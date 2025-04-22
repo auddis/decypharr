@@ -17,6 +17,7 @@ import (
 	"os"
 	path "path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -30,6 +31,7 @@ const (
 	WebDavUseFileNameNoExt     WebDavFolderNaming = "filename_no_ext"
 	WebDavUseOriginalNameNoExt WebDavFolderNaming = "original_no_ext"
 	WebDavUseID                WebDavFolderNaming = "id"
+	WebdavUseHash              WebDavFolderNaming = "infohash"
 )
 
 type PropfindResponse struct {
@@ -396,6 +398,8 @@ func (c *Cache) GetTorrentFolder(torrent *types.Torrent) string {
 		return path.Clean(utils.RemoveExtension(torrent.OriginalFilename))
 	case WebDavUseID:
 		return torrent.Id
+	case WebdavUseHash:
+		return strings.ToLower(torrent.InfoHash)
 	default:
 		return path.Clean(torrent.Filename)
 	}
@@ -404,13 +408,12 @@ func (c *Cache) GetTorrentFolder(torrent *types.Torrent) string {
 func (c *Cache) setTorrent(t *CachedTorrent) {
 	c.torrents.Store(t.Id, t)
 	torrentKey := c.GetTorrentFolder(t.Torrent)
-	if o, ok := c.torrentsNames.Load(torrentKey); ok && o.Id != t.Id {
-		// Save the most recent torrent
-		if t.AddedOn.After(o.AddedOn) {
-			c.torrentsNames.Delete(torrentKey)
-		} else {
-			t = o
-		}
+	if o, ok := c.torrentsNames.Load(torrentKey); ok {
+		// If another torrent with the same name exists, merge the files, if the same file exists,
+		// keep the one with the most recent added date
+
+		mergedFiles := mergeFiles(t, o)
+		t.Files = mergedFiles
 	}
 	c.torrentsNames.Store(torrentKey, t)
 	c.SaveTorrent(t)
@@ -420,13 +423,10 @@ func (c *Cache) setTorrents(torrents map[string]*CachedTorrent) {
 	for _, t := range torrents {
 		c.torrents.Store(t.Id, t)
 		torrentKey := c.GetTorrentFolder(t.Torrent)
-		if o, ok := c.torrentsNames.Load(torrentKey); ok && o.Id != t.Id {
+		if o, ok := c.torrentsNames.Load(torrentKey); ok {
 			// Save the most recent torrent
-			if t.AddedOn.After(o.AddedOn) {
-				c.torrentsNames.Delete(torrentKey)
-			} else {
-				t = o
-			}
+			mergedFiles := mergeFiles(t, o)
+			t.Files = mergedFiles
 		}
 		c.torrentsNames.Store(torrentKey, t)
 	}

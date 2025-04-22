@@ -77,6 +77,7 @@ func (t *Torrent) GetMountFolder(rClonePath string) (string, error) {
 }
 
 type File struct {
+	TorrentId    string        `json:"torrent_id"`
 	Id           string        `json:"id"`
 	Name         string        `json:"name"`
 	Size         int64         `json:"size"`
