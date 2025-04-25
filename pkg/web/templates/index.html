@@ -190,7 +190,7 @@
 
         async function loadTorrents() {
             try {
-                const response = await fetch('/internal/torrents');
+                const response = await fetcher('/api/torrents');
                 const torrents = await response.json();
                 
                 state.torrents = torrents;
@@ -256,7 +256,7 @@
             if (!confirm('Are you sure you want to delete this torrent?')) return;
 
             try {
-                await fetch(`/internal/torrents/${category}/${hash}?removeFromDebrid=${removeFromDebrid}`, {
+                await fetcher(`/api/torrents/${category}/${hash}?removeFromDebrid=${removeFromDebrid}`, {
                     method: 'DELETE'
                 });
                 await loadTorrents();
@@ -273,7 +273,7 @@
             try {
                 // COmma separated list of hashes
                 const hashes = Array.from(state.selectedTorrents).join(',');
-                await fetch(`/internal/torrents/?hashes=${encodeURIComponent(hashes)}`, {
+                await fetcher(`/api/torrents/?hashes=${encodeURIComponent(hashes)}`, {
                     method: 'DELETE'
                 });
                 await loadTorrents();

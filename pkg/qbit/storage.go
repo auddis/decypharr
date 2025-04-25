@@ -250,7 +250,6 @@ func (ts *TorrentStorage) DeleteMultiple(hashes []string, removeFromDebrid bool)
 			if dbClient == nil {
 				continue
 			}
-			fmt.Println("Deleting torrent from debrid:", id)
 			err := dbClient.DeleteTorrent(id)
 			if err != nil {
 				fmt.Println(err)

@@ -112,7 +112,7 @@
                     formData.append('notSymlink', document.getElementById('isSymlink').checked);
                     formData.append('downloadUncached', document.getElementById('downloadUncached').checked);
 
-                    const response = await fetch('/internal/add', {
+                    const response = await fetcher('/api/add', {
                         method: 'POST',
                         body: formData
                     });

@@ -152,7 +152,7 @@
 <script>
     document.addEventListener('DOMContentLoaded', () => {
         // Load Arr instances
-        fetch('/internal/arrs')
+        fetcher('/api/arrs')
             .then(response => response.json())
             .then(arrs => {
                 const select = document.getElementById('arrSelect');
@@ -175,7 +175,7 @@
             let mediaIds = document.getElementById('mediaIds').value.split(',').map(id => id.trim());
             let arr = document.getElementById('arrSelect').value;
             try {
-                const response = await fetch('/internal/repair', {
+                const response = await fetcher('/api/repair', {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json'
@@ -207,8 +207,8 @@
         // Load jobs function
         async function loadJobs(page) {
             try {
-                const response = await fetch('/internal/repair/jobs');
-                if (!response.ok) throw new Error('Failed to fetch jobs');
+                const response = await fetcher('/api/repair/jobs');
+                if (!response.ok) throw new Error('Failed to fetcher jobs');
 
                 allJobs = await response.json();
                 renderJobsTable(page);
@@ -403,7 +403,7 @@
         async function deleteJob(jobId) {
             if (confirm('Are you sure you want to delete this job?')) {
                 try {
-                    const response = await fetch(`/internal/repair/jobs`, {
+                    const response = await fetcher(`/api/repair/jobs`, {
                         method: 'DELETE',
                         headers: {
                             'Content-Type': 'application/json'
@@ -422,7 +422,7 @@
 
         async function deleteMultipleJobs(jobIds) {
             try {
-                const response = await fetch(`/internal/repair/jobs`, {
+                const response = await fetcher(`/api/repair/jobs`, {
                     method: 'DELETE',
                     headers: {
                         'Content-Type': 'application/json'
@@ -441,7 +441,7 @@
         // Process job function
         async function processJob(jobId) {
             try {
-                const response = await fetch(`/internal/repair/jobs/${jobId}/process`, {
+                const response = await fetcher(`/api/repair/jobs/${jobId}/process`, {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json'

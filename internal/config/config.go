@@ -89,7 +89,6 @@ type Config struct {
 
 	LogLevel       string      `json:"log_level,omitempty"`
 	Debrids        []Debrid    `json:"debrids,omitempty"`
-	MaxCacheSize   int         `json:"max_cache_size,omitempty"`
 	QBitTorrent    QBitTorrent `json:"qbittorrent,omitempty"`
 	Arrs           []Arr       `json:"arrs,omitempty"`
 	Repair         Repair      `json:"repair,omitempty"`
@@ -118,39 +117,19 @@ func (c *Config) loadConfig() error {
 	c.Path = configPath
 	file, err := os.ReadFile(c.JsonFile())
 	if err != nil {
-		return err
+		if os.IsNotExist(err) {
+			// Create a default config file if it doesn't exist
+			if err := c.createConfig(c.Path); err != nil {
+				return fmt.Errorf("failed to create config file: %w", err)
+			}
+		} else {
+			return fmt.Errorf("error reading config file: %w", err)
+		}
+	} else {
+		if err := json.Unmarshal(file, &c); err != nil {
+			return fmt.Errorf("error unmarshaling config: %w", err)
+		}
 	}
-
-	if err := json.Unmarshal(file, &c); err != nil {
-		return fmt.Errorf("error unmarshaling config: %w", err)
-	}
-
-	for i, debrid := range c.Debrids {
-		c.Debrids[i] = c.updateDebrid(debrid)
-	}
-
-	if len(c.AllowedExt) == 0 {
-		c.AllowedExt = getDefaultExtensions()
-	}
-
-	c.Port = cmp.Or(c.Port, c.QBitTorrent.Port)
-
-	if c.URLBase == "" {
-		c.URLBase = "/"
-	}
-	// validate url base starts with /
-	if c.URLBase[0] != '/' {
-		c.URLBase = "/" + c.URLBase
-	}
-
-	// Load the auth file
-	c.Auth = c.GetAuth()
-
-	//Validate the config
-	if err := ValidateConfig(c); err != nil {
-		return err
-	}
-
 	return nil
 }
 
@@ -196,15 +175,15 @@ func ValidateConfig(config *Config) error {
 	// Run validations concurrently
 
 	if err := validateDebrids(config.Debrids); err != nil {
-		return fmt.Errorf("debrids validation error: %w", err)
+		return err
 	}
 
 	if err := validateQbitTorrent(&config.QBitTorrent); err != nil {
-		return fmt.Errorf("qbittorrent validation error: %w", err)
+		return err
 	}
 
 	if err := validateRepair(&config.Repair); err != nil {
-		return fmt.Errorf("repair validation error: %w", err)
+		return err
 	}
 
 	return nil
@@ -287,11 +266,8 @@ func (c *Config) SaveAuth(auth *Auth) error {
 	return os.WriteFile(c.AuthFile(), data, 0644)
 }
 
-func (c *Config) NeedsSetup() bool {
-	if err := ValidateConfig(c); err != nil {
-		return true
-	}
-	return false
+func (c *Config) NeedsSetup() error {
+	return ValidateConfig(c)
 }
 
 func (c *Config) NeedsAuth() bool {
@@ -336,6 +312,26 @@ func (c *Config) updateDebrid(d Debrid) Debrid {
 }
 
 func (c *Config) Save() error {
+	for i, debrid := range c.Debrids {
+		c.Debrids[i] = c.updateDebrid(debrid)
+	}
+
+	if len(c.AllowedExt) == 0 {
+		c.AllowedExt = getDefaultExtensions()
+	}
+
+	c.Port = cmp.Or(c.Port, c.QBitTorrent.Port)
+
+	if c.URLBase == "" {
+		c.URLBase = "/"
+	}
+	// validate url base starts with /
+	if c.URLBase[0] != '/' {
+		c.URLBase = "/" + c.URLBase
+	}
+
+	// Load the auth file
+	c.Auth = c.GetAuth()
 	data, err := json.MarshalIndent(c, "", "  ")
 	if err != nil {
 		return err
@@ -345,6 +341,25 @@ func (c *Config) Save() error {
 		return err
 	}
 	return nil
+}
+
+func (c *Config) createConfig(path string) error {
+	// Create the directory if it doesn't exist
+	if err := os.MkdirAll(path, 0755); err != nil {
+		return fmt.Errorf("failed to create config directory: %w", err)
+	}
+
+	c.Path = path
+	c.URLBase = "/"
+	c.Port = "8282"
+	c.LogLevel = "info"
+	c.UseAuth = true
+	c.QBitTorrent = QBitTorrent{
+		DownloadFolder:  filepath.Join(path, "downloads"),
+		Categories:      []string{"sonarr", "radarr"},
+		RefreshInterval: 15,
+	}
+	return c.Save()
 }
 
 // Reload forces a reload of the configuration from disk

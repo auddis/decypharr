@@ -140,7 +140,7 @@ func (h *Handler) OpenFile(ctx context.Context, name string, flag int, perm os.F
 		folderName := strings.TrimPrefix(name, rootDir)
 		folderName = strings.TrimPrefix(folderName, "/")
 
-		// Only fetch the torrent folders once
+		// Only fetcher the torrent folders once
 		children := h.getTorrentsFolders()
 
 		return &File{

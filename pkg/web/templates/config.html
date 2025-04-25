@@ -1,35 +1,86 @@
 {{ define "config" }}
-    <div class="container mt-4">
-        <form id="configForm">
+<style>
+    /* Custom styles for the stepper navigation */
+    .nav-pills .nav-link {
+        color: var(--text-color);
+        background-color: var(--card-bg);
+        margin: 0 3px;
+    }
+
+    .nav-pills .nav-link.active {
+        background-color: var(--primary-color);
+        color: white !important;
+        font-weight: 500 !important;
+    }
+
+    /* For dark mode */
+    [data-bs-theme="dark"] .nav-pills .nav-link.active {
+        color: white !important;
+    }
+</style>
+<div class="container mt-4">
+    <form id="configForm">
         <div class="card">
             <div class="card-header d-flex justify-content-between align-items-center mb-2">
-                <h4 class="mb-0"><i class="bi bi-gear me-2"></i>Configuration</h4>
-                <button type="submit" class="btn btn-primary px-4">
+                <h4 class="mb-0"><i class="bi bi-gear me-2"></i>Settings</h4>
+                <button type="submit" class="btn btn-success px-4">
                     <i class="bi bi-save"></i> Save
                 </button>
             </div>
             <div class="card-body">
+                <!-- Stepper navigation -->
+                <div class="stepper-nav mb-4">
+                    <ul class="nav nav-pills nav-justified">
+                        <li class="nav-item">
+                            <button type="button" class="nav-link active fw-medium" data-step="1">
+                                <i class="bi bi-1-circle me-1"></i>General
+                            </button>
+                        </li>
+                        <li class="nav-item">
+                            <button type="button" class="nav-link fw-medium" data-step="2">
+                                <i class="bi bi-2-circle me-1"></i>Debrid
+                            </button>
+                        </li>
+                        <li class="nav-item">
+                            <button type="button" class="nav-link fw-medium" data-step="3">
+                                <i class="bi bi-3-circle me-1"></i>QBitTorrent
+                            </button>
+                        </li>
+                        <li class="nav-item">
+                            <button type="button" class="nav-link fw-medium" data-step="4">
+                                <i class="bi bi-4-circle me-1"></i>Arr Config
+                            </button>
+                        </li>
+                        <li class="nav-item">
+                            <button type="button" class="nav-link fw-medium" data-step="5">
+                                <i class="bi bi-5-circle me-1"></i>Repair
+                            </button>
+                        </li>
+                    </ul>
+                </div>
+
+                <!-- Step 1: General Configuration -->
+                <div class="setup-step" id="step1">
                     <div class="section mb-5">
-                        <h5 class="border-bottom pb-2">General Configuration</h5>
                         <div class="row">
                             <div class="col-md-6">
-                            <div class="form-group">
-                                <label for="log-level">Log Level</label>
-                                <select class="form-select" name="log_level" id="log-level">
-                                    <option value="info">Info</option>
-                                    <option value="debug">Debug</option>
-                                    <option value="warn">Warning</option>
-                                    <option value="error">Error</option>
-                                    <option value="trace">Trace</option>
-                                </select>
-                            </div>
+                                <div class="form-group">
+                                    <label for="log-level">Log Level</label>
+                                    <select class="form-select" name="log_level" id="log-level">
+                                        <option value="info">Info</option>
+                                        <option value="debug">Debug</option>
+                                        <option value="warn">Warning</option>
+                                        <option value="error">Error</option>
+                                        <option value="trace">Trace</option>
+                                    </select>
+                                </div>
                             </div>
                             <!-- Register Magnet Link Button -->
-                             <div class="col-md-6">
+                            <div class="col-md-6">
                                 <label>
                                     <!-- Empty label to keep the button aligned -->
                                 </label>
-                                <div class="btn btn-primary w-100" onclick="registerMagnetLinkHandler()" id="registerMagnetLink">
+                                <div class="btn btn-primary w-100" onclick="registerMagnetLinkHandler();" id="registerMagnetLink">
                                     Open Magnet Links in Decypharr
                                 </div>
                             </div>
@@ -37,7 +88,6 @@
                                 <div class="form-group">
                                     <label for="urlBase">URL Base</label>
                                     <input type="text"
-                                           disabled
                                            class="form-control"
                                            id="urlBase"
                                            name="url_base"
@@ -49,7 +99,6 @@
                                 <div class="form-group">
                                     <label for="bindAddress">Bind Address</label>
                                     <input type="text"
-                                             disabled
                                            class="form-control"
                                            id="bindAddress"
                                            name="bind_address"
@@ -61,7 +110,6 @@
                                 <div class="form-group">
                                     <label for="port">Port</label>
                                     <input type="text"
-                                           disabled
                                            class="form-control"
                                            id="port"
                                            name="port"
@@ -74,10 +122,10 @@
                                     <label for="discordWebhookUrl">Discord Webhook URL</label>
                                     <div class="input-group">
                                         <textarea
-                                               class="form-control"
-                                               id="discordWebhookUrl"
-                                               name="discord_webhook_url"
-                                               placeholder="https://discord..."></textarea>
+                                                class="form-control"
+                                                id="discordWebhookUrl"
+                                                name="discord_webhook_url"
+                                                placeholder="https://discord..."></textarea>
                                     </div>
                                 </div>
                             </div>
@@ -86,10 +134,10 @@
                                     <label for="allowedExtensions">Allowed File Extensions</label>
                                     <div class="input-group">
                                         <textarea
-                                               class="form-control"
-                                               id="allowedExtensions"
-                                               name="allowed_file_types"
-                                               placeholder="mkv, mp4, avi, etc.">
+                                                class="form-control"
+                                                id="allowedExtensions"
+                                                name="allowed_file_types"
+                                                placeholder="mkv, mp4, avi, etc.">
                                         </textarea>
                                     </div>
                                 </div>
@@ -102,7 +150,7 @@
                                            id="minFileSize"
                                            name="min_file_size"
                                            placeholder="e.g., 10MB, 1GB">
-                                    <small class="form-text text-muted">Minimum file size to download (0 for no limit)</small>
+                                    <small class="form-text text-muted">Minimum file size to download (Empty for no limit)</small>
                                 </div>
                             </div>
                             <div class="col-md-6 mt-3">
@@ -113,14 +161,19 @@
                                            id="maxFileSize"
                                            name="max_file_size"
                                            placeholder="e.g., 50GB, 100MB">
-                                    <small class="form-text text-muted">Maximum file size to download (0 for no limit)</small>
+                                    <small class="form-text text-muted">Maximum file size to download (Empty for no limit)</small>
                                 </div>
                             </div>
                         </div>
                     </div>
-                    <!-- Debrid Configuration -->
+                    <div class="mt-4 d-flex justify-content-end">
+                        <button type="button" class="btn btn-primary next-step" data-next="2">Next <i class="bi bi-arrow-right"></i></button>
+                    </div>
+                </div>
+
+                <!-- Step 2: Debrid Configuration -->
+                <div class="setup-step d-none" id="step2">
                     <div class="section mb-5">
-                        <h5 class="border-bottom pb-2">Debrids</h5>
                         <div id="debridConfigs"></div>
                         <div class="mb-3">
                             <button type="button" id="addDebridBtn" class="btn btn-secondary">
@@ -128,19 +181,18 @@
                             </button>
                         </div>
                     </div>
+                    <div class="mt-4 d-flex justify-content-between">
+                        <button type="button" class="btn btn-outline-secondary prev-step" data-prev="1">
+                            <i class="bi bi-arrow-left"></i> Previous
+                        </button>
+                        <button type="button" class="btn btn-primary next-step" data-next="3">Next <i class="bi bi-arrow-right"></i></button>
+                    </div>
+                </div>
 
-                    <!-- QBitTorrent Configuration -->
+                <!-- Step 3: QBitTorrent Configuration -->
+                <div class="setup-step d-none" id="step3">
                     <div class="section mb-5">
-                        <h5 class="border-bottom pb-2">QBitTorrent</h5>
                         <div class="row">
-                            <div class="col-md-6 mb-3">
-                                <label class="form-label" for="qbit.username">Username</label>
-                                <input type="text" class="form-control" name="qbit.username" id="qbit.username">
-                            </div>
-                            <div class="col-md-6 mb-3">
-                                <label class="form-label" for="qbit.password">Password</label>
-                                <input type="password" class="form-control" name="qbit.password" id="qbit.password">
-                            </div>
                             <div class="col-md-6 mb-3">
                                 <label class="form-label" for="qbit.download_folder">Symlink/Download Folder</label>
                                 <input type="text" class="form-control" name="qbit.download_folder" id="qbit.download_folder">
@@ -154,13 +206,20 @@
                                     <input type="checkbox" class="form-check-input" name="qbit.skip_pre_cache" id="qbit.skip_pre_cache">
                                     <label class="form-check-label" for="qbit.skip_pre_cache">Skip Pre-Cache On Download(This caches a tiny part of your file to speed up import)</label>
                                 </div>
-                                </div>
+                            </div>
                         </div>
                     </div>
+                    <div class="mt-4 d-flex justify-content-between">
+                        <button type="button" class="btn btn-outline-secondary prev-step" data-prev="2">
+                            <i class="bi bi-arrow-left"></i> Previous
+                        </button>
+                        <button type="button" class="btn btn-primary next-step" data-next="4">Next <i class="bi bi-arrow-right"></i></button>
+                    </div>
+                </div>
 
-                    <!-- Arr Configurations -->
+                <!-- Step 4: Arr Configuration -->
+                <div class="setup-step d-none" id="step4">
                     <div class="section mb-5">
-                        <h5 class="border-bottom pb-2">Arr Configurations</h5>
                         <div id="arrConfigs"></div>
                         <div class="mb-3">
                             <button type="button" id="addArrBtn" class="btn btn-secondary">
@@ -168,10 +227,17 @@
                             </button>
                         </div>
                     </div>
+                    <div class="mt-4 d-flex justify-content-between">
+                        <button type="button" class="btn btn-outline-secondary prev-step" data-prev="3">
+                            <i class="bi bi-arrow-left"></i> Previous
+                        </button>
+                        <button type="button" class="btn btn-primary next-step" data-next="5">Next <i class="bi bi-arrow-right"></i></button>
+                    </div>
+                </div>
 
-                    <!-- Repair Configuration -->
+                <!-- Step 5: Repair Configuration -->
+                <div class="setup-step d-none" id="step5">
                     <div class="section mb-5">
-                        <h5 class="border-bottom pb-2">Repair Configuration</h5>
                         <div class="row mb-2">
                             <div class="col">
                                 <div class="form-check me-3 d-inline-block">
@@ -219,325 +285,222 @@
                             </div>
                         </div>
                     </div>
-                    <div class="text-end mt-3">
-                        <button type="submit" class="btn btn-primary px-4">
+                    <div class="mt-4 d-flex justify-content-between">
+                        <button type="button" class="btn btn-outline-secondary prev-step" data-prev="4">
+                            <i class="bi bi-arrow-left"></i> Previous
+                        </button>
+                        <button type="submit" class="btn btn-success">
                             <i class="bi bi-save"></i> Save
                         </button>
                     </div>
+                </div>
             </div>
         </div>
-        </form>
+    </form>
+</div>
+
+<script>
+    // Templates for dynamic elements
+    const debridTemplate = (index) => `
+<div class="config-item position-relative mb-3 p-3 border rounded">
+    <button type="button" class="btn btn-sm btn-danger position-absolute top-0 end-0 m-2"
+        onclick="if(confirm('Are you sure you want to delete this debrid?')) this.closest('.config-item').remove();"
+        title="Delete this debrid">
+        <i class="bi bi-trash"></i>
+    </button>
+    <div class="row">
+        <div class="col-md-6 mb-3">
+            <label class="form-label" for="debrid[${index}].name" >Name</label>
+            <select class="form-select" name="debrid[${index}].name" id="debrid[${index}].name" required>
+                <option value="realdebrid">Real Debrid</option>
+                <option value="alldebrid">AllDebrid</option>
+                <option value="debrid_link">Debrid Link</option>
+                <option value="torbox">Torbox</option>
+            </select>
+        </div>
+        <div class="col-md-6 mb-3">
+            <label class="form-label" for="debrid[${index}].api_key" >API Key</label>
+            <input type="password" class="form-control" name="debrid[${index}].api_key" id="debrid[${index}].api_key" required>
+        </div>
+        <div class="col-md-6 mb-3">
+            <label class="form-label" for="debrid[${index}].folder" >Mount Folder</label>
+            <input type="text" class="form-control" name="debrid[${index}].folder" id="debrid[${index}].folder" placeholder="e.g. /mnt/remote/realdebrid" required>
+        </div>
+        <div class="col-md-6 mb-3">
+            <label class="form-label" for="debrid[${index}].rate_limit" >Rate Limit</label>
+            <input type="text" class="form-control" name="debrid[${index}].rate_limit" id="debrid[${index}].rate_limit" placeholder="e.g., 200/minute" value="250/minute">
+        </div>
+        <div class="col-12">
+            <div class="form-check me-3 d-inline-block">
+                <input type="checkbox" class="form-check-input" name="debrid[${index}].download_uncached" id="debrid[${index}].download_uncached">
+                <label class="form-check-label" for="debrid[${index}].download_uncached" >Download Uncached</label>
+            </div>
+            <div class="form-check me-3 d-inline-block">
+                <input type="checkbox" class="form-check-input" name="debrid[${index}].check_cached" id="debrid[${index}].check_cached">
+                <label class="form-check-label" for="debrid[${index}].check_cached" >Check Cached</label>
+            </div>
+            <div class="form-check d-inline-block">
+                <input type="checkbox" class="form-check-input useWebdav" name="debrid[${index}].use_webdav" id="debrid[${index}].use_webdav">
+                <label class="form-check-label" for="debrid[${index}].use_webdav" >Use WebDav</label>
+            </div>
+        </div>
     </div>
-    <script>
-        // Templates for dynamic elements
-        const debridTemplate = (index) => `
-        <div class="config-item position-relative mb-3 p-3 border rounded">
-            <button type="button" class="btn btn-sm btn-danger position-absolute top-0 end-0 m-2"
-                onclick="if(confirm('Are you sure you want to delete this debrid?')) this.closest('.config-item').remove();"
-                title="Delete this debrid">
-                <i class="bi bi-trash"></i>
-            </button>
-            <div class="row">
-                <div class="col-md-6 mb-3">
-                    <label class="form-label" for="debrid[${index}].name" >Name</label>
-                    <input type="text" class="form-control" name="debrid[${index}].name" id="debrid[${index}].name" required>
-                </div>
-                <div class="col-md-6 mb-3">
-                    <label class="form-label" for="debrid[${index}].api_key" >API Key</label>
-                    <input type="password" class="form-control" name="debrid[${index}].api_key" id="debrid[${index}].api_key" required>
-                </div>
-                <div class="col-md-6 mb-3">
-                    <label class="form-label" for="debrid[${index}].folder" >Mount Folder</label>
-                    <input type="text" class="form-control" name="debrid[${index}].folder" id="debrid[${index}].folder">
-                </div>
-                <div class="col-md-6 mb-3">
-                    <label class="form-label" for="debrid[${index}].rate_limit" >Rate Limit</label>
-                    <input type="text" class="form-control" name="debrid[${index}].rate_limit" id="debrid[${index}].rate_limit" placeholder="e.g., 200/minute">
-                </div>
-                <div class="col-12">
-                    <div class="form-check me-3 d-inline-block">
-                        <input type="checkbox" class="form-check-input" name="debrid[${index}].download_uncached" id="debrid[${index}].download_uncached">
-                        <label class="form-check-label" for="debrid[${index}].download_uncached" >Download Uncached</label>
-                    </div>
-                    <div class="form-check me-3 d-inline-block">
-                        <input type="checkbox" class="form-check-input" name="debrid[${index}].check_cached" id="debrid[${index}].check_cached">
-                        <label class="form-check-label" for="debrid[${index}].check_cached" >Check Cached</label>
-                    </div>
-                    <div class="form-check d-inline-block">
-                        <input type="checkbox" class="form-check-input useWebdav" name="debrid[${index}].use_webdav" id="debrid[${index}].use_webdav">
-                        <label class="form-check-label" for="debrid[${index}].use_webdav" >Use WebDav</label>
-                    </div>
+    <div class="row mt-3 webdav d-none">
+        <h6 class="pb-2">Webdav</h6>
+        <div class="col-md-3 mb-3">
+            <label class="form-label" for="debrid[${index}].torrents_refresh_interval">Torrents Refresh Interval</label>
+            <input type="text" class="form-control webdav-field" name="debrid[${index}].torrents_refresh_interval" id="debrid[${index}].torrents_refresh_interval" placeholder="15s" value="15s">
+        </div>
+        <div class="col-md-3 mb-3">
+            <label class="form-label" for="debrid[${index}].download_links_refresh_interval">Download Links Refresh Interval</label>
+            <input type="text" class="form-control webdav-field" name="debrid[${index}].download_links_refresh_interval" id="debrid[${index}].download_links_refresh_interval" placeholder="40m" value="40m">
+        </div>
+        <div class="col-md-3 mb-3">
+            <label class="form-label" for="debrid[${index}].auto_expire_links_after">Expire Links After</label>
+            <input type="text" class="form-control webdav-field" name="debrid[${index}].auto_expire_links_after" id="debrid[${index}].auto_expire_links_after" placeholder="3d" value="3d">
+        </div>
+        <div class="col-md-3 mb-3">
+            <label class="form-label" for="debrid[${index}].folder_naming">Folder Naming Structure</label>
+            <select class="form-select webdav-field" name="debrid[${index}].folder_naming" id="debrid[${index}].folder_naming">
+                <option value="original_no_ext" selected>Original name with No Ext</option>
+                <option value="original">Original name</option>
+                <option value="filename">File name</option>
+                <option value="filename_no_ext">File name with No Ext</option>
+                <option value="id">Use ID</option>
+                <option value="infohash">Use Infohash</option>
+            </select>
+        </div>
+        <div class="col-md-3 mb-3">
+            <label class="form-label" for="debrid[${index}].workers">Number of Workers</label>
+            <input type="text" class="form-control webdav-field" name="debrid[${index}].workers" id="debrid[${index}].workers" placeholder="e.g., 50" value="50">
+        </div>
+        <div class="col-md-3 mb-3">
+            <label class="form-label" for="debrid[${index}].rc_url">Rclone RC URL</label>
+            <input type="text" class="form-control webdav-field" name="debrid[${index}].rc_url" id="debrid[${index}].rc_url" placeholder="e.g., http://localhost:9990">
+        </div>
+        <div class="col-md-3 mb-3">
+            <label class="form-label" for="debrid[${index}].rc_user">Rclone RC User</label>
+            <input type="text" class="form-control webdav-field" name="debrid[${index}].rc_user" id="debrid[${index}].rc_user">
+        </div>
+        <div class="col-md-3 mb-3">
+            <label class="form-label" for="debrid[${index}].rc_pass">Rclone RC Password</label>
+            <input type="password" class="form-control webdav-field" name="debrid[${index}].rc_pass" id="debrid[${index}].rc_pass">
+        </div>
+    </div>
+</div>
+`;
+
+    const arrTemplate = (index) => `
+    <div class="config-item position-relative mb-3 p-3 border rounded">
+        <button type="button" class="btn btn-sm btn-danger position-absolute top-0 end-0 m-2"
+            onclick="if(confirm('Are you sure you want to delete this arr?')) this.closest('.config-item').remove();"
+            title="Delete this arr">
+            <i class="bi bi-trash"></i>
+        </button>
+        <div class="row">
+            <div class="col-md-4 mb-3">
+                <label for="arr[${index}].name" class="form-label">Name</label>
+                <input type="text" class="form-control" name="arr[${index}].name" id="arr[${index}].name" required>
+            </div>
+            <div class="col-md-4 mb-3">
+                <label for="arr[${index}].host" class="form-label">Host</label>
+                <input type="text" class="form-control" name="arr[${index}].host" id="arr[${index}].host" required>
+            </div>
+            <div class="col-md-4 mb-3">
+                <label for"arr[${index}].token" class="form-label">API Token</label>
+                <input type="password" class="form-control" name="arr[${index}].token" id="arr[${index}].token" required>
+            </div>
+        </div>
+        <div class="row">
+            <div class="col-md-2 mb-3">
+                <div class="form-check">
+                    <label for="arr[${index}].cleanup" class="form-check-label">Cleanup Queue</label>
+                    <input type="checkbox" class="form-check-input" name="arr[${index}].cleanup" id="arr[${index}].cleanup">
                 </div>
             </div>
-            <div class="row mt-3 webdav d-none">
-                <h6 class="pb-2">Webdav</h6>
-                <div class="col-md-3 mb-3">
-                    <label class="form-label" for="debrid[${index}].torrents_refresh_interval">Torrents Refresh Interval</label>
-                    <input type="text" class="form-control" name="debrid[${index}].torrents_refresh_interval" id="debrid[${index}].torrents_refresh_interval" placeholder="15s" required>
+            <div class="col-md-2 mb-3">
+                <div class="form-check">
+                    <label for="arr[${index}].skip_repair" class="form-check-label">Skip Repair</label>
+                    <input type="checkbox" class="form-check-input" name="arr[${index}].skip_repair" id="arr[${index}].skip_repair">
                 </div>
-                <div class="col-md-3 mb-3">
-                    <label class="form-label" for="debrid[${index}].download_links_refresh_interval">Download Links Refresh Interval</label>
-                    <input type="text" class="form-control" name="debrid[${index}].download_links_refresh_interval" id="debrid[${index}].download_links_refresh_interval" placeholder="24h" required>
-                </div>
-                <div class="col-md-3 mb-3">
-                    <label class="form-label" for="debrid[${index}].auto_expire_links_after">Expire Links After</label>
-                    <input type="text" class="form-control" name="debrid[${index}].auto_expire_links_after" id="debrid[${index}].auto_expire_links_after" placeholder="24h" required>
-                </div>
-                <div class="col-md-3 mb-3">
-                    <label class="form-label" for="debrid[${index}].folder_naming">Folder Naming Structure</label>
-                    <select class="form-select" name="debrid[${index}].folder_naming" id="debrid[${index}].folder_naming">
-                        <option value="filename">File name</option>
-                        <option value="filename_no_ext">File name with No Ext</option>
-                        <option value="original">Original name</option>
-                        <option value="original_no_ext">Original name with No Ext</option>
-                        <option value="id">Use ID</option>
-                        <option value="infohash">Use Infohash</option>
-                    </select>
-                </div>
-                <div class="col-md-3 mb-3">
-                    <label class="form-label" for="debrid[${index}].workers">Number of Workers</label>
-                    <input type="text" class="form-control" name="debrid[${index}].workers" id="debrid[${index}].workers" required placeholder="e.g., 20">
-                </div>
-                <div class="col-md-3 mb-3">
-                    <label class="form-label" for="debrid[${index}].rc_url">Rclone RC URL</label>
-                    <input type="text" class="form-control" name="debrid[${index}].rc_url" id="debrid[${index}].rc_url" placeholder="e.g., http://localhost:9990">
-                </div>
-                <div class="col-md-3 mb-3">
-                    <label class="form-label" for="debrid[${index}].rc_user">Rclone RC User</label>
-                    <input type="text" class="form-control" name="debrid[${index}].rc_user" id="debrid[${index}].rc_user">
-                </div>
-                <div class="col-md-3 mb-3">
-                    <label class="form-label" for="debrid[${index}].rc_pass">Rclone RC Password</label>
-                    <input type="password" class="form-control" name="debrid[${index}].rc_pass" id="debrid[${index}].rc_pass">
+            </div>
+            <div class="col-md-2 mb-3">
+                <div class="form-check">
+                    <label for="arr[${index}].download_uncached" class="form-check-label">Download Uncached</label>
+                    <input type="checkbox" class="form-check-input" name="arr[${index}].download_uncached" id="arr[${index}].download_uncached">
                 </div>
             </div>
         </div>
+    </div>
     `;
 
-        const arrTemplate = (index) => `
-        <div class="config-item position-relative mb-3 p-3 border rounded">
-            <button type="button" class="btn btn-sm btn-danger position-absolute top-0 end-0 m-2"
-                onclick="if(confirm('Are you sure you want to delete this arr?')) this.closest('.config-item').remove();"
-                title="Delete this arr">
-                <i class="bi bi-trash"></i>
-            </button>
-            <div class="row">
-                <div class="col-md-4 mb-3">
-                    <label for="arr[${index}].name" class="form-label">Name</label>
-                    <input type="text" class="form-control" name="arr[${index}].name" id="arr[${index}].name" required>
-                </div>
-                <div class="col-md-4 mb-3">
-                    <label for="arr[${index}].host" class="form-label">Host</label>
-                    <input type="text" class="form-control" name="arr[${index}].host" id="arr[${index}].host" required>
-                </div>
-                <div class="col-md-4 mb-3">
-                    <label for"arr[${index}].token" class="form-label">API Token</label>
-                    <input type="password" class="form-control" name="arr[${index}].token" id="arr[${index}].token" required>
-                </div>
-            </div>
-            <div class="row">
-                <div class="col-md-2 mb-3">
-                    <div class="form-check">
-                        <label for="arr[${index}].cleanup" class="form-check-label">Cleanup Queue</label>
-                        <input type="checkbox" class="form-check-input" name="arr[${index}].cleanup" id="arr[${index}].cleanup">
-                    </div>
-                </div>
-                <div class="col-md-2 mb-3">
-                    <div class="form-check">
-                        <label for="arr[${index}].skip_repair" class="form-check-label">Skip Repair</label>
-                        <input type="checkbox" class="form-check-input" name="arr[${index}].skip_repair" id="arr[${index}].skip_repair">
-                    </div>
-                </div>
-                <div class="col-md-2 mb-3">
-                    <div class="form-check">
-                        <label for="arr[${index}].download_uncached" class="form-check-label">Download Uncached</label>
-                        <input type="checkbox" class="form-check-input" name="arr[${index}].download_uncached" id="arr[${index}].download_uncached">
-                    </div>
-                </div>
-            </div>
-        </div>
-    `;
+    // Main functionality
+    document.addEventListener('DOMContentLoaded', function() {
+        let debridCount = 0;
+        let arrCount = 0;
+        let currentStep = 1;
 
-        // Main functionality
-        document.addEventListener('DOMContentLoaded', function() {
-            let debridCount = 0;
-            let arrCount = 0;
+        // Check query parameters for incomplete config
+        const urlParams = new URLSearchParams(window.location.search);
+        if (urlParams.has('inco')) {
+            const errMsg = urlParams.get('inco');
+            createToast(`Incomplete configuration: ${errMsg}`, 'warning');
+        }
 
-            // Load existing configuration
-            fetch('/internal/config')
-                .then(response => response.json())
-                .then(config => {
-                    // Load Debrid configs
-                    config.debrids?.forEach(debrid => {
-                        addDebridConfig(debrid);
-                    });
+        // Step navigation
+        document.querySelectorAll('.nav-link').forEach(navLink => {
+            navLink.addEventListener('click', function() {
+                const stepNumber = parseInt(this.getAttribute('data-step'));
+                goToStep(stepNumber);
+            });
+        });
 
-                    // Load QBitTorrent config
-                    if (config.qbittorrent) {
-                        Object.entries(config.qbittorrent).forEach(([key, value]) => {
-                            const input = document.querySelector(`[name="qbit.${key}"]`);
-                            if (input) {
-                                if (input.type === 'checkbox') {
-                                    input.checked = value;
-                                } else {
-                                    input.value = value;
-                                }
-                            }
-                        });
-                    }
+        document.querySelectorAll('.next-step').forEach(button => {
+            button.addEventListener('click', function() {
+                const nextStep = parseInt(this.getAttribute('data-next'));
+                goToStep(nextStep);
+            });
+        });
 
-                    // Load Arr configs
-                    config.arrs?.forEach(arr => {
-                        addArrConfig(arr);
-                    });
+        document.querySelectorAll('.prev-step').forEach(button => {
+            button.addEventListener('click', function() {
+                const prevStep = parseInt(this.getAttribute('data-prev'));
+                goToStep(prevStep);
+            });
+        });
 
-                    // Load Repair config
-                    if (config.repair) {
-                        if (config.repair.enabled) {
-                            document.getElementById('repairCol').classList.remove('d-none');
-                        }
-                        Object.entries(config.repair).forEach(([key, value]) => {
-                            const input = document.querySelector(`[name="repair.${key}"]`);
-                            if (input) {
-                                if (input.type === 'checkbox') {
-                                    input.checked = value;
-                                } else {
-                                    input.value = value;
-                                }
-                            }
-                        });
-                    }
+        function goToStep(stepNumber) {
+            // Hide all steps
+            document.querySelectorAll('.setup-step').forEach(step => {
+                step.classList.add('d-none');
+            });
 
-                    // Load general config
+            // Show the target step
+            document.getElementById(`step${stepNumber}`).classList.remove('d-none');
 
-                    const logLevel = document.getElementById('log-level');
-                    logLevel.value = config.log_level;
-                    if (config.allowed_file_types && Array.isArray(config.allowed_file_types)) {
-                        document.querySelector('[name="allowed_file_types"]').value = config.allowed_file_types.join(', ');
-                    }
-                    if (config.min_file_size) {
-                        document.querySelector('[name="min_file_size"]').value = config.min_file_size;
-                    }
-                    if (config.max_file_size) {
-                        document.querySelector('[name="max_file_size"]').value = config.max_file_size;
-                    }
-                    if (config.discord_webhook_url) {
-                        document.querySelector('[name="discord_webhook_url"]').value = config.discord_webhook_url;
-                    }
-                    if (config.url_base) {
-                        document.querySelector('[name="url_base"]').value = config.url_base;
-                    }
-                    if (config.bind_address) {
-                        document.querySelector('[name="bind_address"]').value = config.bind_address;
-                    }
-                    if (config.port) {
-                        document.querySelector('[name="port"]').value = config.port;
-                    }
-                })
-                .catch(error => {
-                    console.error('Error loading configuration:', error);
-                    createToast(`Error loading configuration: ${error.message}`, 'error');
+            // Update nav pills
+            document.querySelectorAll('.nav-link').forEach(link => {
+                link.classList.remove('active');
+            });
+            document.querySelector(`.nav-link[data-step="${stepNumber}"]`).classList.add('active');
+
+            // Update current step
+            currentStep = stepNumber;
+        }
+
+        // Load existing configuration
+        fetcher('/api/config')
+            .then(response => response.json())
+            .then(config => {
+                // Load Debrid configs
+                config.debrids?.forEach(debrid => {
+                    addDebridConfig(debrid);
                 });
 
-            // Handle form submission
-            document.getElementById('configForm').addEventListener('submit', async (e) => {
-                e.preventDefault();
-                await saveConfig(e);
-            });
-
-            document.getElementById('addDebridBtn').addEventListener('click', () => {
-                addDebridConfig();
-            });
-            document.getElementById('addArrBtn').addEventListener('click', () => {
-                addArrConfig();
-            });
-
-            $(document).on('change', '.useWebdav', function() {
-                const webdavConfig = $(this).closest('.config-item').find(`.webdav`);
-                if (webdavConfig.length === 0) return;
-                if (this.checked) {
-                    webdavConfig.removeClass('d-none');
-                } else {
-                    webdavConfig.addClass('d-none');
-                }
-            });
-
-            $(document).on('change', 'input[name="repair.enabled"]', function() {
-                if (this.checked) {
-                    $('#repairCol').removeClass('d-none');
-                } else {
-                    $('#repairCol').addClass('d-none');
-                }
-            });
-
-
-
-            // In your JavaScript for the config page:
-            async function saveConfig(e) {
-                const submitButton = e.target.querySelector('button[type="submit"]');
-                submitButton.disabled = true;
-                submitButton.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Saving...';
-                // Show a spinner or loading overlay
-                const overlay = document.createElement('div');
-                    overlay.className = 'position-fixed top-0 start-0 w-100 h-100 d-flex justify-content-center align-items-center';
-                    overlay.style.backgroundColor = 'rgba(0, 0, 0, 0.5)';
-                    overlay.style.zIndex = '9999';
-                    overlay.innerHTML = `
-                    <div class="card p-4 text-center">
-                        <div class="spinner-border mb-3" role="status"></div>
-                        <h5>Applying configuration changes...</h5>
-                        <p class="text-muted">This may take a few seconds</p>
-                    </div>
-                `;
-                document.body.appendChild(overlay);
-
-                try {
-                    const config = collectFormData();
-                    // Save config logic
-                    const response = await fetch('/internal/config', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify(config)
-                    });
-
-                    if (!response.ok) throw new Error(await response.text());
-
-                    createToast('Configuration saved successfully! Services are restarting...', 'success');
-
-                    // Wait a moment before reloading to allow the server to restart
-                    setTimeout(() => {
-                        window.location.reload();
-                    }, 1500);
-                } catch (error) {
-                    createToast(`Error saving configuration: ${error.message}`, 'error');
-                    console.error('Error saving configuration:', error);
-                    overlay.remove(); // Remove overlay on error
-                } finally {
-                    // Re-enable the button
-                    submitButton.disabled = false;
-                    submitButton.innerHTML = '<i class="bi bi-save"></i> Save';
-                }
-            }
-
-            function addDebridConfig(data = {}) {
-                const container = document.getElementById('debridConfigs');
-                container.insertAdjacentHTML('beforeend', debridTemplate(debridCount));
-
-                // Add a delete button to the new debrid
-                const newDebrid = container.lastElementChild;
-                addDeleteButton(newDebrid, `Delete this debrid`);
-
-                if (data) {
-
-                    if (data.use_webdav) {
-                        let _webCfg = newDebrid.querySelector(`.webdav`);
-                        if (_webCfg) {
-                            _webCfg.classList.remove('d-none');
-                        }
-                    }
-
-                    Object.entries(data).forEach(([key, value]) => {
-                        const input = container.querySelector(`[name="debrid[${debridCount}].${key}"]`);
+                // Load QBitTorrent config
+                if (config.qbittorrent) {
+                    Object.entries(config.qbittorrent).forEach(([key, value]) => {
+                        const input = document.querySelector(`[name="qbit.${key}"]`);
                         if (input) {
                             if (input.type === 'checkbox') {
                                 input.checked = value;
@@ -548,20 +511,18 @@
                     });
                 }
 
-                debridCount++;
-            }
+                // Load Arr configs
+                config.arrs?.forEach(arr => {
+                    addArrConfig(arr);
+                });
 
-            function addArrConfig(data = {}) {
-                const container = document.getElementById('arrConfigs');
-                container.insertAdjacentHTML('beforeend', arrTemplate(arrCount));
-
-                // Add a delete button to the new arr
-                const newArr = container.lastElementChild;
-                addDeleteButton(newArr, `Delete this arr`);
-
-                if (data) {
-                    Object.entries(data).forEach(([key, value]) => {
-                        const input = container.querySelector(`[name="arr[${arrCount}].${key}"]`);
+                // Load Repair config
+                if (config.repair) {
+                    if (config.repair.enabled) {
+                        document.getElementById('repairCol').classList.remove('d-none');
+                    }
+                    Object.entries(config.repair).forEach(([key, value]) => {
+                        const input = document.querySelector(`[name="repair.${key}"]`);
                         if (input) {
                             if (input.type === 'checkbox') {
                                 input.checked = value;
@@ -572,127 +533,301 @@
                     });
                 }
 
-                arrCount++;
+                // Load general config
+                const logLevel = document.getElementById('log-level');
+                logLevel.value = config.log_level;
+                if (config.allowed_file_types && Array.isArray(config.allowed_file_types)) {
+                    document.querySelector('[name="allowed_file_types"]').value = config.allowed_file_types.join(', ');
+                }
+                if (config.min_file_size) {
+                    document.querySelector('[name="min_file_size"]').value = config.min_file_size;
+                }
+                if (config.max_file_size) {
+                    document.querySelector('[name="max_file_size"]').value = config.max_file_size;
+                }
+                if (config.discord_webhook_url) {
+                    document.querySelector('[name="discord_webhook_url"]').value = config.discord_webhook_url;
+                }
+                if (config.url_base) {
+                    document.querySelector('[name="url_base"]').value = config.url_base;
+                }
+                if (config.bind_address) {
+                    document.querySelector('[name="bind_address"]').value = config.bind_address;
+                }
+                if (config.port) {
+                    document.querySelector('[name="port"]').value = config.port;
+                }
+            })
+            .catch(error => {
+                console.log(error);
+                console.error('Error loading configuration:', error);
+                createToast(`Error loading configuration: ${error.message}`, 'error');
+            });
+
+        // Handle form submission
+        document.getElementById('configForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            await saveConfig(e);
+        });
+
+        document.getElementById('addDebridBtn').addEventListener('click', () => {
+            addDebridConfig();
+        });
+        document.getElementById('addArrBtn').addEventListener('click', () => {
+            addArrConfig();
+        });
+
+        $(document).on('change', '.useWebdav', function() {
+            const webdavConfig = $(this).closest('.config-item').find(`.webdav`);
+            if (webdavConfig.length === 0) return;
+
+            const webdavFields = webdavConfig.find('.webdav-field');
+
+            if (this.checked) {
+                webdavConfig.removeClass('d-none');
+                // Add required attribute to key fields
+                webdavConfig.find('input[name$=".torrents_refresh_interval"]').prop('required', true);
+                webdavConfig.find('input[name$=".download_links_refresh_interval"]').prop('required', true);
+                webdavConfig.find('input[name$=".auto_expire_links_after"]').prop('required', true);
+                webdavConfig.find('input[name$=".workers"]').prop('required', true);
+            } else {
+                webdavConfig.addClass('d-none');
+                // Remove required attribute from all fields
+                webdavFields.prop('required', false);
             }
+        });
 
-            function addDeleteButton(element, tooltip) {
-                const deleteBtn = document.createElement('button');
-                deleteBtn.type = 'button';
-                deleteBtn.className = 'btn btn-sm btn-danger position-absolute top-0 end-0 m-2';
-                deleteBtn.innerHTML = '<i class="bi bi-trash"></i>';
-                deleteBtn.title = tooltip;
+        $(document).on('change', 'input[name="repair.enabled"]', function() {
+            if (this.checked) {
+                $('#repairCol').removeClass('d-none');
+            } else {
+                $('#repairCol').addClass('d-none');
+            }
+        });
 
-                deleteBtn.addEventListener('click', function() {
-                    if (confirm('Are you sure you want to delete this item?')) {
-                        element.remove();
+        async function saveConfig(e) {
+            const submitButton = e.target.querySelector('button[type="submit"]');
+            submitButton.disabled = true;
+            submitButton.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Saving...';
+            // Show a spinner or loading overlay
+            const overlay = document.createElement('div');
+            overlay.className = 'position-fixed top-0 start-0 w-100 h-100 d-flex justify-content-center align-items-center';
+            overlay.style.backgroundColor = 'rgba(0, 0, 0, 0.5)';
+            overlay.style.zIndex = '9999';
+            overlay.innerHTML = `
+               <div class="card p-4 text-center">
+                   <div class="spinner-border mb-3" role="status"></div>
+                   <h5>Applying configuration changes...</h5>
+                   <p class="text-muted">This may take a few seconds</p>
+               </div>
+           `;
+            document.body.appendChild(overlay);
+
+            try {
+                const config = collectFormData();
+                // Save config logic
+                const response = await fetcher('/api/config', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(config)
+                });
+
+                if (!response.ok) throw new Error(await response.text());
+
+                createToast('Configuration saved successfully! Services are restarting...', 'success');
+
+                // Wait a moment before reloading to allow the server to restart
+                setTimeout(() => {
+                    window.location.reload();
+                }, 1500);
+            } catch (error) {
+                createToast(`Error saving configuration: ${error.message}`, 'error');
+                console.error('Error saving configuration:', error);
+                overlay.remove(); // Remove overlay on error
+            } finally {
+                // Re-enable the button
+                submitButton.disabled = false;
+                submitButton.innerHTML = '<i class="bi bi-save"></i> Save';
+            }
+        }
+
+        function addDebridConfig(data = {}) {
+            const container = document.getElementById('debridConfigs');
+            container.insertAdjacentHTML('beforeend', debridTemplate(debridCount));
+
+            // Add a delete button to the new debrid
+            const newDebrid = container.lastElementChild;
+            addDeleteButton(newDebrid, `Delete this debrid`);
+
+            if (data) {
+                if (data.use_webdav) {
+                    let _webCfg = newDebrid.querySelector(`.webdav`);
+                    if (_webCfg) {
+                        _webCfg.classList.remove('d-none');
+                    }
+                }
+
+                Object.entries(data).forEach(([key, value]) => {
+                    const input = container.querySelector(`[name="debrid[${debridCount}].${key}"]`);
+                    if (input) {
+                        if (input.type === 'checkbox') {
+                            input.checked = value;
+                        } else {
+                            input.value = value;
+                        }
                     }
                 });
-                element.appendChild(deleteBtn);
             }
 
-            function collectFormData() {
-                const formEl = document.getElementById('configForm');
+            debridCount++;
+        }
 
-                // Create the config object
-                const config = {
-                    log_level: document.getElementById('log-level').value,
-                    discord_webhook_url: document.getElementById('discordWebhookUrl').value,
-                    allowed_file_types: document.getElementById('allowedExtensions').value.split(',').map(ext => ext.trim()).filter(Boolean),
-                    min_file_size: document.getElementById('minFileSize').value,
-                    max_file_size: document.getElementById('maxFileSize').value,
-                    debrids: [],
-                    qbittorrent: {
-                        username: document.querySelector('[name="qbit.username"]').value,
-                        password: document.querySelector('[name="qbit.password"]').value,
-                        download_folder: document.querySelector('[name="qbit.download_folder"]').value,
-                        refresh_interval: parseInt(document.querySelector('[name="qbit.refresh_interval"]').value || '0', 10)
-                    },
-                    arrs: [],
-                    repair: {
-                        enabled: document.querySelector('[name="repair.enabled"]').checked,
-                        interval: document.querySelector('[name="repair.interval"]').value,
-                        run_on_start: document.querySelector('[name="repair.run_on_start"]').checked,
-                        reinsert: document.querySelector('[name="repair.reinsert"]').checked,
-                        zurg_url: document.querySelector('[name="repair.zurg_url"]').value,
-                        use_webdav: document.querySelector('[name="repair.use_webdav"]').checked,
-                        auto_process: document.querySelector('[name="repair.auto_process"]').checked
+        function addArrConfig(data = {}) {
+            const container = document.getElementById('arrConfigs');
+            container.insertAdjacentHTML('beforeend', arrTemplate(arrCount));
+
+            // Add a delete button to the new arr
+            const newArr = container.lastElementChild;
+            addDeleteButton(newArr, `Delete this arr`);
+
+            if (data) {
+                Object.entries(data).forEach(([key, value]) => {
+                    const input = container.querySelector(`[name="arr[${arrCount}].${key}"]`);
+                    if (input) {
+                        if (input.type === 'checkbox') {
+                            input.checked = value;
+                        } else {
+                            input.value = value;
+                        }
                     }
+                });
+            }
+
+            arrCount++;
+        }
+
+        function addDeleteButton(element, tooltip) {
+            const deleteBtn = document.createElement('button');
+            deleteBtn.type = 'button';
+            deleteBtn.className = 'btn btn-sm btn-danger position-absolute top-0 end-0 m-2';
+            deleteBtn.innerHTML = '<i class="bi bi-trash"></i>';
+            deleteBtn.title = tooltip;
+
+            deleteBtn.addEventListener('click', function() {
+                if (confirm('Are you sure you want to delete this item?')) {
+                    element.remove();
+                }
+            });
+            element.appendChild(deleteBtn);
+        }
+
+        function collectFormData() {
+            // Create the config object
+            const config = {
+                log_level: document.getElementById('log-level').value,
+                discord_webhook_url: document.getElementById('discordWebhookUrl').value,
+                allowed_file_types: document.getElementById('allowedExtensions').value.split(',').map(ext => ext.trim()).filter(Boolean),
+                min_file_size: document.getElementById('minFileSize').value,
+                max_file_size: document.getElementById('maxFileSize').value,
+                url_base: document.getElementById('urlBase').value,
+                bind_address: document.getElementById('bindAddress').value,
+                port: document.getElementById('port').value,
+                debrids: [],
+                qbittorrent: {
+                    download_folder: document.querySelector('[name="qbit.download_folder"]').value,
+                    refresh_interval: parseInt(document.querySelector('[name="qbit.refresh_interval"]').value || '0', 10),
+                    skip_pre_cache: document.querySelector('[name="qbit.skip_pre_cache"]').checked
+                },
+                arrs: [],
+                repair: {
+                    enabled: document.querySelector('[name="repair.enabled"]').checked,
+                    interval: document.querySelector('[name="repair.interval"]').value,
+                    run_on_start: document.querySelector('[name="repair.run_on_start"]').checked,
+                    reinsert: document.querySelector('[name="repair.reinsert"]').checked,
+                    zurg_url: document.querySelector('[name="repair.zurg_url"]').value,
+                    use_webdav: document.querySelector('[name="repair.use_webdav"]').checked,
+                    auto_process: document.querySelector('[name="repair.auto_process"]').checked
+                }
+            };
+
+            // Collect all debrids
+            for (let i = 0; i < debridCount; i++) {
+                const nameEl = document.querySelector(`[name="debrid[${i}].name"]`);
+                if (!nameEl) continue;
+
+                const debrid = {
+                    name: nameEl.value,
+                    api_key: document.querySelector(`[name="debrid[${i}].api_key"]`).value,
+                    folder: document.querySelector(`[name="debrid[${i}].folder"]`).value,
+                    rate_limit: document.querySelector(`[name="debrid[${i}].rate_limit"]`).value,
+                    download_uncached: document.querySelector(`[name="debrid[${i}].download_uncached"]`).checked,
+                    check_cached: document.querySelector(`[name="debrid[${i}].check_cached"]`).checked,
+                    use_webdav: document.querySelector(`[name="debrid[${i}].use_webdav"]`).checked
                 };
 
-                // Collect all debrids
-                for (let i = 0; i < debridCount; i++) {
-                    const nameEl = document.querySelector(`[name="debrid[${i}].name"]`);
-                    if (!nameEl) continue;
-
-                    const debrid = {
-                        name: nameEl.value,
-                        api_key: document.querySelector(`[name="debrid[${i}].api_key"]`).value,
-                        folder: document.querySelector(`[name="debrid[${i}].folder"]`).value,
-                        rate_limit: document.querySelector(`[name="debrid[${i}].rate_limit"]`).value,
-                        download_uncached: document.querySelector(`[name="debrid[${i}].download_uncached"]`).checked,
-                        check_cached: document.querySelector(`[name="debrid[${i}].check_cached"]`).checked,
-                        use_webdav: document.querySelector(`[name="debrid[${i}].use_webdav"]`).checked,
-                        torrents_refresh_interval: document.querySelector(`[name="debrid[${i}].torrents_refresh_interval"]`).value,
-                        download_links_refresh_interval: document.querySelector(`[name="debrid[${i}].download_links_refresh_interval"]`).value,
-                        auto_expire_links_after: document.querySelector(`[name="debrid[${i}].auto_expire_links_after"]`).value,
-                        folder_naming: document.querySelector(`[name="debrid[${i}].folder_naming"]`).value,
-                        workers: parseInt(document.querySelector(`[name="debrid[${i}].workers"]`).value),
-                        rc_url: document.querySelector(`[name="debrid[${i}].rc_url"]`).value,
-                        rc_user: document.querySelector(`[name="debrid[${i}].rc_user"]`).value,
-                        rc_pass: document.querySelector(`[name="debrid[${i}].rc_pass"]`).value
-                    };
-
-                    if (debrid.name && debrid.api_key) {
-                        config.debrids.push(debrid);
-                    }
+                // Add WebDAV specific properties if enabled
+                if (debrid.use_webdav) {
+                    debrid.torrents_refresh_interval = document.querySelector(`[name="debrid[${i}].torrents_refresh_interval"]`).value;
+                    debrid.download_links_refresh_interval = document.querySelector(`[name="debrid[${i}].download_links_refresh_interval"]`).value;
+                    debrid.auto_expire_links_after = document.querySelector(`[name="debrid[${i}].auto_expire_links_after"]`).value;
+                    debrid.folder_naming = document.querySelector(`[name="debrid[${i}].folder_naming"]`).value;
+                    debrid.workers = parseInt(document.querySelector(`[name="debrid[${i}].workers"]`).value);
+                    debrid.rc_url = document.querySelector(`[name="debrid[${i}].rc_url"]`).value;
+                    debrid.rc_user = document.querySelector(`[name="debrid[${i}].rc_user"]`).value;
+                    debrid.rc_pass = document.querySelector(`[name="debrid[${i}].rc_pass"]`).value;
                 }
 
-                // Collect all arrs
-                for (let i = 0; i < arrCount; i++) {
-                    const nameEl = document.querySelector(`[name="arr[${i}].name"]`);
-                    if (!nameEl) continue;
-
-                    const arr = {
-                        name: nameEl.value,
-                        host: document.querySelector(`[name="arr[${i}].host"]`).value,
-                        token: document.querySelector(`[name="arr[${i}].token"]`).value,
-                        cleanup: document.querySelector(`[name="arr[${i}].cleanup"]`).checked,
-                        skip_repair: document.querySelector(`[name="arr[${i}].skip_repair"]`).checked,
-                        download_uncached: document.querySelector(`[name="arr[${i}].download_uncached"]`).checked
-                    };
-
-                    if (arr.name && arr.host) {
-                        config.arrs.push(arr);
-                    }
-                }
-
-                return config;
-            }
-
-        });
-        // Register magnet link handler
-        function registerMagnetLinkHandler() {
-            if ('registerProtocolHandler' in navigator) {
-                try {
-                    navigator.registerProtocolHandler(
-                        'magnet',
-                        `${window.location.origin}/download?magnet=%s`,
-                        'DecyphArr'
-                    );
-                    localStorage.setItem('magnetHandler', 'true');
-                    document.getElementById('registerMagnetLink').innerText = '✅ DecyphArr Can Open Magnet Links';
-                    document.getElementById('registerMagnetLink').classList.add('bg-white', 'text-black');
-                    console.log('Registered magnet link handler successfully.');
-                } catch (error) {
-                    console.error('Failed to register magnet link handler:', error);
+                if (debrid.name && debrid.api_key) {
+                    config.debrids.push(debrid);
                 }
             }
-        }
 
-        var magnetHandler = localStorage.getItem('magnetHandler');
-        if (magnetHandler === 'true') {
-            document.getElementById('registerMagnetLink').innerText = '✅ DecyphArr Can Open Magnet Links';
-            document.getElementById('registerMagnetLink').classList.add('bg-white', 'text-black');
+            // Collect all arrs
+            for (let i = 0; i < arrCount; i++) {
+                const nameEl = document.querySelector(`[name="arr[${i}].name"]`);
+                if (!nameEl) continue;
+
+                const arr = {
+                    name: nameEl.value,
+                    host: document.querySelector(`[name="arr[${i}].host"]`).value,
+                    token: document.querySelector(`[name="arr[${i}].token"]`).value,
+                    cleanup: document.querySelector(`[name="arr[${i}].cleanup"]`).checked,
+                    skip_repair: document.querySelector(`[name="arr[${i}].skip_repair"]`).checked,
+                    download_uncached: document.querySelector(`[name="arr[${i}].download_uncached"]`).checked
+                };
+
+                if (arr.name && arr.host) {
+                    config.arrs.push(arr);
+                }
+            }
+
+            return config;
         }
-    </script>
+    });
+
+    // Register magnet link handler
+    function registerMagnetLinkHandler() {
+        if ('registerProtocolHandler' in navigator) {
+            try {
+                navigator.registerProtocolHandler(
+                    'magnet',
+                    `${window.location.origin}/download?magnet=%s`,
+                    'DecyphArr'
+                );
+                localStorage.setItem('magnetHandler', 'true');
+                document.getElementById('registerMagnetLink').innerText = '✅ DecyphArr Can Open Magnet Links';
+                document.getElementById('registerMagnetLink').classList.add('bg-white', 'text-black');
+                console.log('Registered magnet link handler successfully.');
+            } catch (error) {
+                console.error('Failed to register magnet link handler:', error);
+            }
+        }
+    }
+
+    var magnetHandler = localStorage.getItem('magnetHandler');
+    if (magnetHandler === 'true') {
+        document.getElementById('registerMagnetLink').innerText = '✅ DecyphArr Can Open Magnet Links';
+        document.getElementById('registerMagnetLink').classList.add('bg-white', 'text-black');
+    }
+</script>
 {{ end }}

@@ -200,7 +200,6 @@ func (as *Storage) cleanupArrsQueue() {
 		arrs = append(arrs, arr)
 	}
 	if len(arrs) > 0 {
-		as.logger.Trace().Msgf("Cleaning up %d arrs", len(arrs))
 		for _, arr := range arrs {
 			if err := arr.CleanupQueue(); err != nil {
 				as.logger.Error().Err(err).Msgf("Failed to cleanup arr %s", arr.Name)

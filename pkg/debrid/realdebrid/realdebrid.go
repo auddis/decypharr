@@ -64,32 +64,27 @@ func New(dc config.Debrid) *RealDebrid {
 		"Authorization": fmt.Sprintf("Bearer %s", currentDownloadKey),
 	}
 
-	downloadClient := request.New(
-		request.WithHeaders(downloadHeaders),
-		request.WithRateLimiter(rl),
-		request.WithLogger(_log),
-		request.WithMaxRetries(5),
-		request.WithRetryableStatus(429, 447),
-		request.WithProxy(dc.Proxy),
-	)
-
-	client := request.New(
-		request.WithHeaders(headers),
-		request.WithRateLimiter(rl),
-		request.WithLogger(_log),
-		request.WithMaxRetries(5),
-		request.WithRetryableStatus(429),
-		request.WithProxy(dc.Proxy),
-	)
-
 	return &RealDebrid{
-		Name:               "realdebrid",
-		Host:               "https://api.real-debrid.com/rest/1.0",
-		APIKey:             dc.APIKey,
-		DownloadKeys:       accounts,
-		DownloadUncached:   dc.DownloadUncached,
-		client:             client,
-		downloadClient:     downloadClient,
+		Name:             "realdebrid",
+		Host:             "https://api.real-debrid.com/rest/1.0",
+		APIKey:           dc.APIKey,
+		DownloadKeys:     accounts,
+		DownloadUncached: dc.DownloadUncached,
+		client: request.New(
+			request.WithHeaders(headers),
+			request.WithRateLimiter(rl),
+			request.WithLogger(_log),
+			request.WithMaxRetries(5),
+			request.WithRetryableStatus(429),
+			request.WithProxy(dc.Proxy),
+		),
+		downloadClient: request.New(
+			request.WithHeaders(downloadHeaders),
+			request.WithLogger(_log),
+			request.WithMaxRetries(10),
+			request.WithRetryableStatus(429, 447),
+			request.WithProxy(dc.Proxy),
+		),
 		currentDownloadKey: currentDownloadKey,
 		MountPath:          dc.Folder,
 		logger:             logger.New(dc.Name),

@@ -83,10 +83,6 @@ func (s *Server) Start(ctx context.Context) error {
 	return srv.Shutdown(context.Background())
 }
 
-func (s *Server) Mount(pattern string, handler http.Handler) {
-	s.router.Mount(pattern, handler)
-}
-
 func (s *Server) getLogs(w http.ResponseWriter, r *http.Request) {
 	logFile := logger.GetLogPath()
 

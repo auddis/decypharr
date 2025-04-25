@@ -10,16 +10,19 @@ func (ui *Handler) Routes() http.Handler {
 
 	r.Get("/login", ui.LoginHandler)
 	r.Post("/login", ui.LoginHandler)
-	r.Get("/auth", ui.SetupHandler)
-	r.Post("/auth", ui.SetupHandler)
+	r.Get("/register", ui.RegisterHandler)
+	r.Post("/register", ui.RegisterHandler)
+	r.Get("/skip-auth", ui.skipAuthHandler)
+	r.Get("/version", ui.handleGetVersion)
 
 	r.Group(func(r chi.Router) {
 		r.Use(ui.authMiddleware)
+		r.Use(ui.setupMiddleware)
 		r.Get("/", ui.IndexHandler)
 		r.Get("/download", ui.DownloadHandler)
 		r.Get("/repair", ui.RepairHandler)
 		r.Get("/config", ui.ConfigHandler)
-		r.Route("/internal", func(r chi.Router) {
+		r.Route("/api", func(r chi.Router) {
 			r.Get("/arrs", ui.handleGetArrs)
 			r.Post("/add", ui.handleAddContent)
 			r.Post("/repair", ui.handleRepairMedia)
@@ -31,7 +34,6 @@ func (ui *Handler) Routes() http.Handler {
 			r.Delete("/torrents/", ui.handleDeleteTorrents)
 			r.Get("/config", ui.handleGetConfig)
 			r.Post("/config", ui.handleUpdateConfig)
-			r.Get("/version", ui.handleGetVersion)
 		})
 	})
 

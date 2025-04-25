@@ -177,16 +177,17 @@ func (q *QBit) createSymlinksWebdav(debridTorrent *debrid.Torrent, rclonePath, t
 
 			// Check which files exist in this batch
 			for _, entry := range entries {
-				if file, exists := remainingFiles[entry.Name()]; exists {
-					fullFilePath := filepath.Join(rclonePath, file.Name)
+				filename := entry.Name()
+				if file, exists := remainingFiles[filename]; exists {
+					fullFilePath := filepath.Join(rclonePath, filename)
 					fileSymlinkPath := filepath.Join(symlinkPath, file.Name)
 
 					if err := os.Symlink(fullFilePath, fileSymlinkPath); err != nil && !os.IsExist(err) {
 						q.logger.Debug().Msgf("Failed to create symlink: %s: %v", fileSymlinkPath, err)
 					} else {
-						q.logger.Info().Msgf("File is ready: %s", file.Name)
 						filePaths = append(filePaths, fileSymlinkPath)
-						delete(remainingFiles, file.Name)
+						delete(remainingFiles, filename)
+						q.logger.Info().Msgf("File is ready: %s", file.Name)
 					}
 				}
 			}
