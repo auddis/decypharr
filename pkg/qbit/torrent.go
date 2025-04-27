@@ -103,8 +103,6 @@ func (q *QBit) ProcessFiles(torrent *Torrent, debridTorrent *debrid.Torrent, arr
 	)
 	debridTorrent.Arr = arr
 
-	// File is done downloading at this stage
-
 	// Check if debrid supports webdav by checking cache
 	if isSymlink {
 		cache, ok := svc.Debrid.Caches[debridTorrent.Debrid]

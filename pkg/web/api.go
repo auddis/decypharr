@@ -241,6 +241,7 @@ func (ui *Handler) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 			DownloadUncached: a.DownloadUncached,
 		})
 	}
+	currentConfig.Arrs = updatedConfig.Arrs
 	if err := currentConfig.Save(); err != nil {
 		http.Error(w, "Error saving config: "+err.Error(), http.StatusInternalServerError)
 		return

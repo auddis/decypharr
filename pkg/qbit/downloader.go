@@ -222,39 +222,44 @@ func (q *QBit) createSymlinks(debridTorrent *debrid.Torrent, rclonePath, torrent
 		return "", fmt.Errorf("failed to create directory: %s: %v", symlinkPath, err)
 	}
 
-	pending := make(map[string]debrid.File)
+	remainingFiles := make(map[string]debrid.File)
 	for _, file := range files {
-		pending[file.Path] = file
+		remainingFiles[file.Path] = file
 	}
-	ticker := time.NewTicker(10 * time.Millisecond)
-	defer ticker.Stop()
-	filePaths := make([]string, 0, len(pending))
 
-	for len(pending) > 0 {
-		<-ticker.C
-		for path, file := range pending {
-			fullFilePath := filepath.Join(rclonePath, file.Name)
-			if _, err := os.Stat(fullFilePath); !os.IsNotExist(err) {
-				q.logger.Info().Msgf("File is ready: %s", file.Name)
-				fileSymlinkPath := filepath.Join(symlinkPath, file.Name)
-				if err := os.Symlink(fullFilePath, fileSymlinkPath); err != nil && !os.IsExist(err) {
-					q.logger.Debug().Msgf("Failed to create symlink: %s: %v", fileSymlinkPath, err)
-				}
-				filePaths = append(filePaths, fileSymlinkPath)
-				delete(pending, path)
-			} else if file.Name != file.Path {
-				// This is likely alldebrid nested files(not using webdav)
-				fullFilePath = filepath.Join(rclonePath, file.Path)
-				if _, err := os.Stat(fullFilePath); !os.IsNotExist(err) {
-					q.logger.Info().Msgf("File is ready: %s", file.Path)
-					fileSymlinkPath := filepath.Join(symlinkPath, file.Path)
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	timeout := time.After(30 * time.Minute)
+	filePaths := make([]string, 0, len(files))
+
+	for len(remainingFiles) > 0 {
+		select {
+		case <-ticker.C:
+			entries, err := os.ReadDir(rclonePath)
+			if err != nil {
+				continue
+			}
+
+			// Check which files exist in this batch
+			for _, entry := range entries {
+				filename := entry.Name()
+				if file, exists := remainingFiles[filename]; exists {
+					fullFilePath := filepath.Join(rclonePath, filename)
+					fileSymlinkPath := filepath.Join(symlinkPath, file.Name)
+
 					if err := os.Symlink(fullFilePath, fileSymlinkPath); err != nil && !os.IsExist(err) {
 						q.logger.Debug().Msgf("Failed to create symlink: %s: %v", fileSymlinkPath, err)
+					} else {
+						filePaths = append(filePaths, fileSymlinkPath)
+						delete(remainingFiles, filename)
+						q.logger.Info().Msgf("File is ready: %s", file.Name)
 					}
-					filePaths = append(filePaths, fileSymlinkPath)
-					delete(pending, path)
 				}
 			}
+
+		case <-timeout:
+			q.logger.Warn().Msgf("Timeout waiting for files, %d files still pending", len(remainingFiles))
+			return symlinkPath, fmt.Errorf("timeout waiting for files")
 		}
 	}
 
@@ -267,10 +272,9 @@ func (q *QBit) createSymlinks(debridTorrent *debrid.Torrent, rclonePath, torrent
 		if err := q.preCacheFile(debridTorrent.Name, filePaths); err != nil {
 			q.logger.Error().Msgf("Failed to pre-cache file: %s", err)
 		} else {
-			q.logger.Debug().Msgf("Pre-cached %d files", len(filePaths))
+			q.logger.Trace().Msgf("Pre-cached %d files", len(filePaths))
 		}
 	}() // Pre-cache the files in the background
-	// Pre-cache the first 256KB and 1MB of the file
 	return symlinkPath, nil
 }
 

@@ -621,13 +621,12 @@ func (c *Cache) GetClient() types.Client {
 }
 
 func (c *Cache) DeleteTorrent(id string) error {
-	c.logger.Info().Msgf("Deleting torrent %s from cache", id)
 	c.torrentsRefreshMu.Lock()
 	defer c.torrentsRefreshMu.Unlock()
 
 	if c.deleteTorrent(id, true) {
 		c.RefreshListings(true)
-		c.logger.Info().Msgf("Torrent %s deleted successfully", id)
+		c.logger.Trace().Msgf("Torrent %s deleted successfully", id)
 		return nil
 	}
 	return nil
