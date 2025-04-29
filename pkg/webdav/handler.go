@@ -267,7 +267,6 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		ttl := 1 * time.Minute
 		if h.isParentPath(r.URL.Path) {
 			// __all__ or torrents folder
-			// Manually build the xml
 			ttl = 30 * time.Second
 		}
 
@@ -345,7 +344,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if file, ok := fRaw.(*File); ok {
 			link, err := file.getDownloadLink()
 			if err != nil {
-				h.logger.Error().
+				h.logger.Trace().
 					Err(err).
 					Str("path", r.URL.Path).
 					Msg("Could not fetch download link")

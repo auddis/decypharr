@@ -36,11 +36,11 @@ func (c *Cache) RefreshListings(refreshRclone bool) {
 		return
 	}
 	// Copy the torrents to a string|time map
-	torrentsTime := make(map[string]time.Time, c.torrents.Size())
-	torrents := make([]string, 0, c.torrents.Size())
-	c.torrentsNames.Range(func(key string, value *CachedTorrent) bool {
-		torrentsTime[key] = value.AddedOn
-		torrents = append(torrents, key)
+	torrentsTime := make(map[string]time.Time, c.torrentsNames.Size())
+	torrents := make([]string, 0, c.torrentsNames.Size())
+	c.torrentsNames.Range(func(name string, value *CachedTorrent) bool {
+		torrentsTime[name] = value.AddedOn
+		torrents = append(torrents, name)
 		return true
 	})
 
@@ -59,7 +59,7 @@ func (c *Cache) RefreshListings(refreshRclone bool) {
 	}
 	// Atomic store of the complete ready-to-use slice
 	c.listings.Store(files)
-	if err := c.RefreshParentXml(); err != nil {
+	if err := c.refreshParentXml(); err != nil {
 		c.logger.Debug().Err(err).Msg("Failed to refresh XML")
 	}
 

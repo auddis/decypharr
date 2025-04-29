@@ -2,14 +2,12 @@ package debrid
 
 import (
 	"fmt"
-	"net/http"
-	"os"
-	"path"
-	"path/filepath"
-	"time"
-
 	"github.com/beevik/etree"
 	"github.com/sirrobot01/decypharr/internal/request"
+	"net/http"
+	"os"
+	path "path/filepath"
+	"time"
 )
 
 // resetPropfindResponse resets the propfind response cache for the specified parent directories.
@@ -38,19 +36,19 @@ func (c *Cache) resetPropfindResponse() error {
 	return nil
 }
 
-func (c *Cache) RefreshParentXml() error {
+func (c *Cache) refreshParentXml() error {
 	parents := []string{"__all__", "torrents"}
 	torrents := c.GetListing()
 	clientName := c.client.GetName()
 	for _, parent := range parents {
-		if err := c.refreshParentXml(torrents, clientName, parent); err != nil {
+		if err := c.refreshFolderXml(torrents, clientName, parent); err != nil {
 			return fmt.Errorf("failed to refresh XML for %s: %v", parent, err)
 		}
 	}
 	return nil
 }
 
-func (c *Cache) refreshParentXml(torrents []os.FileInfo, clientName, parent string) error {
+func (c *Cache) refreshFolderXml(torrents []os.FileInfo, clientName, parent string) error {
 	// Define the WebDAV namespace
 	davNS := "DAV:"
 
@@ -65,15 +63,15 @@ func (c *Cache) refreshParentXml(torrents []os.FileInfo, clientName, parent stri
 	currentTime := time.Now().UTC().Format(http.TimeFormat)
 
 	// Add the parent directory
-	baseUrl := path.Clean(path.Join("webdav", clientName, parent))
-	parentPath := path.Join(baseUrl)
+	baseUrl := path.Clean(fmt.Sprintf("/webdav/%s/%s", clientName, parent))
+	parentPath := fmt.Sprintf("%s/", baseUrl)
 	addDirectoryResponse(multistatus, parentPath, parent, currentTime)
 
 	// Add torrents to the XML
 	for _, torrent := range torrents {
 		name := torrent.Name()
 		// Note the path structure change - parent first, then torrent name
-		torrentPath := filepath.Join("webdav",
+		torrentPath := fmt.Sprintf("/webdav/%s/%s/%s/",
 			clientName,
 			parent,
 			name,
