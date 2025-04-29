@@ -17,7 +17,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -340,29 +339,34 @@ func New(options ...ClientOption) *Client {
 }
 
 func ParseRateLimit(rateStr string) *rate.Limiter {
-	if rateStr == "" {
-		return nil
-	}
-	re := regexp.MustCompile(`(\d+)/(minute|second)`)
-	matches := re.FindStringSubmatch(rateStr)
-	if len(matches) != 3 {
+	parts := strings.SplitN(rateStr, "/", 2)
+	if len(parts) != 2 {
 		return nil
 	}
 
-	count, err := strconv.Atoi(matches[1])
-	if err != nil {
+	// parse count
+	count, err := strconv.Atoi(strings.TrimSpace(parts[0]))
+	if err != nil || count <= 0 {
 		return nil
 	}
 
-	unit := matches[2]
+	// normalize unit
+	unit := strings.ToLower(strings.TrimSpace(parts[1]))
+	unit = strings.TrimSuffix(unit, "s")
+	burstSize := int(math.Ceil(float64(count) * 0.1))
+	if burstSize < 1 {
+		burstSize = 1
+	}
+	if burstSize > count {
+		burstSize = count
+	}
 	switch unit {
-	case "minute":
-		reqsPerSecond := float64(count) / 60.0
-		burstSize := int(math.Max(30, float64(count)*0.25))
-		return rate.NewLimiter(rate.Limit(reqsPerSecond), burstSize)
-	case "second":
-		burstSize := int(math.Max(30, float64(count)*5))
+	case "minute", "min":
+		return rate.NewLimiter(rate.Limit(float64(count)/60.0), burstSize)
+	case "second", "sec":
 		return rate.NewLimiter(rate.Limit(float64(count)), burstSize)
+	case "hour", "hr":
+		return rate.NewLimiter(rate.Limit(float64(count)/3600.0), burstSize)
 	default:
 		return nil
 	}
