@@ -165,7 +165,7 @@ func (h *Handler) OpenFile(ctx context.Context, name string, flag int, perm os.F
 	_path := strings.TrimPrefix(name, rootDir)
 	parts := strings.Split(strings.TrimPrefix(_path, string(os.PathSeparator)), string(os.PathSeparator))
 
-	if len(parts) >= 2 && (slices.Contains(h.getParentItems(), parts[0])) {
+	if len(parts) >= 2 && (utils.Contains(h.getParentItems(), parts[0])) {
 
 		torrentName := parts[1]
 		cachedTorrent := h.cache.GetTorrentByName(torrentName)

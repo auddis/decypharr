@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"github.com/goccy/go-json"
-	"github.com/puzpuzpuz/xsync/v3"
 	"github.com/rs/zerolog"
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/logger"
@@ -16,7 +15,6 @@ import (
 	"net/http"
 	gourl "net/url"
 	"path/filepath"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -30,7 +28,8 @@ type RealDebrid struct {
 
 	APIKey             string
 	currentDownloadKey string
-	DownloadKeys       *xsync.MapOf[string, types.Account] // index | Account
+	accounts           map[string]types.Account
+	accountsMutex      sync.RWMutex
 
 	DownloadUncached bool
 	client           *request.Client
@@ -49,15 +48,15 @@ func New(dc config.Debrid) *RealDebrid {
 	}
 	_log := logger.New(dc.Name)
 
-	accounts := xsync.NewMapOf[string, types.Account]()
+	accounts := make(map[string]types.Account)
 	currentDownloadKey := dc.DownloadAPIKeys[0]
 	for idx, key := range dc.DownloadAPIKeys {
 		id := strconv.Itoa(idx)
-		accounts.Store(id, types.Account{
+		accounts[id] = types.Account{
 			Name:  key,
 			ID:    id,
 			Token: key,
-		})
+		}
 	}
 
 	downloadHeaders := map[string]string{
@@ -68,7 +67,7 @@ func New(dc config.Debrid) *RealDebrid {
 		Name:             "realdebrid",
 		Host:             "https://api.real-debrid.com/rest/1.0",
 		APIKey:           dc.APIKey,
-		DownloadKeys:     accounts,
+		accounts:         accounts,
 		DownloadUncached: dc.DownloadUncached,
 		client: request.New(
 			request.WithHeaders(headers),
@@ -381,9 +380,12 @@ func (r *RealDebrid) CheckStatus(t *types.Torrent, isSymlink bool) (*types.Torre
 			}
 			payload := strings.NewReader(p.Encode())
 			req, _ := http.NewRequest(http.MethodPost, fmt.Sprintf("%s/torrents/selectFiles/%s", r.Host, t.Id), payload)
-			_, err = r.client.MakeRequest(req)
+			res, err := r.client.Do(req)
 			if err != nil {
 				return t, err
+			}
+			if res.StatusCode != http.StatusNoContent {
+				return t, fmt.Errorf("realdebrid API error: Status: %d", res.StatusCode)
 			}
 		} else if status == "downloaded" {
 			t.Files = getSelectedFiles(t, data) // Get selected files
@@ -395,7 +397,7 @@ func (r *RealDebrid) CheckStatus(t *types.Torrent, isSymlink bool) (*types.Torre
 				}
 			}
 			break
-		} else if slices.Contains(r.GetDownloadingStatus(), status) {
+		} else if utils.Contains(r.GetDownloadingStatus(), status) {
 			if !t.DownloadUncached {
 				return t, fmt.Errorf("torrent: %s not cached", t.Name)
 			}
@@ -556,12 +558,13 @@ func (r *RealDebrid) GetDownloadLink(t *types.Torrent, file *types.File) (*types
 	if err != nil {
 		if errors.Is(err, request.TrafficExceededError) {
 			// Retries generating
-			retries = 4
+			retries = 5
 		} else {
 			// If the error is not traffic exceeded, return the error
 			return nil, err
 		}
 	}
+	backOff := 1 * time.Second
 	for retries > 0 {
 		downloadLink, err = r._getDownloadLink(file)
 		if err == nil {
@@ -571,7 +574,8 @@ func (r *RealDebrid) GetDownloadLink(t *types.Torrent, file *types.File) (*types
 			return nil, err
 		}
 		// Add a delay before retrying
-		time.Sleep(5 * time.Second)
+		time.Sleep(backOff)
+		backOff *= 2 // Exponential backoff
 	}
 	return downloadLink, nil
 }
@@ -755,35 +759,42 @@ func (r *RealDebrid) GetMountPath() string {
 }
 
 func (r *RealDebrid) DisableAccount(accountId string) {
-	if r.DownloadKeys.Size() == 1 {
+	r.accountsMutex.Lock()
+	defer r.accountsMutex.Unlock()
+	if len(r.accounts) == 1 {
 		r.logger.Info().Msgf("Cannot disable last account: %s", accountId)
 		return
 	}
 	r.currentDownloadKey = ""
-	if value, ok := r.DownloadKeys.Load(accountId); ok {
+	if value, ok := r.accounts[accountId]; ok {
 		value.Disabled = true
-		r.DownloadKeys.Store(accountId, value)
+		r.accounts[accountId] = value
 		r.logger.Info().Msgf("Disabled account Index: %s", value.ID)
 	}
 }
 
 func (r *RealDebrid) ResetActiveDownloadKeys() {
-	r.DownloadKeys.Range(func(key string, value types.Account) bool {
+	r.accountsMutex.Lock()
+	defer r.accountsMutex.Unlock()
+	for key, value := range r.accounts {
 		value.Disabled = false
-		r.DownloadKeys.Store(key, value)
-		return true
-	})
+		r.accounts[key] = value
+	}
 }
 
 func (r *RealDebrid) getActiveAccounts() []types.Account {
+	r.accountsMutex.RLock()
+	defer r.accountsMutex.RUnlock()
 	accounts := make([]types.Account, 0)
-	r.DownloadKeys.Range(func(key string, value types.Account) bool {
+
+	for _, value := range r.accounts {
 		if value.Disabled {
-			return true
+			continue
 		}
 		accounts = append(accounts, value)
-		return true
-	})
+	}
+
+	// Sort accounts by ID
 	sort.Slice(accounts, func(i, j int) bool {
 		return accounts[i].ID < accounts[j].ID
 	})

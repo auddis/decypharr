@@ -128,23 +128,17 @@ func (c *Cache) refreshTorrents() {
 		go func() {
 			defer wg.Done()
 			for t := range workChan {
-				select {
-				default:
-					if err := c.ProcessTorrent(t); err != nil {
-						c.logger.Error().Err(err).Msgf("Failed to process new torrent %s", t.Id)
-						errChan <- err
-					}
-					counter++
+				if err := c.ProcessTorrent(t); err != nil {
+					c.logger.Error().Err(err).Msgf("Failed to process new torrent %s", t.Id)
+					errChan <- err
 				}
+				counter++
 			}
 		}()
 	}
 
 	for _, t := range newTorrents {
-		select {
-		default:
-			workChan <- t
-		}
+		workChan <- t
 	}
 	close(workChan)
 	wg.Wait()

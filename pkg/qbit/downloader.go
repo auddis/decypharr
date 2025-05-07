@@ -5,7 +5,7 @@ import (
 	"github.com/cavaliergopher/grab/v3"
 	"github.com/sirrobot01/decypharr/internal/request"
 	"github.com/sirrobot01/decypharr/internal/utils"
-	debrid "github.com/sirrobot01/decypharr/pkg/debrid/types"
+	debridTypes "github.com/sirrobot01/decypharr/pkg/debrid/types"
 	"io"
 	"os"
 	"path/filepath"
@@ -102,7 +102,7 @@ func (q *QBit) downloadFiles(torrent *Torrent, parent string) {
 		}
 		wg.Add(1)
 		q.downloadSemaphore <- struct{}{}
-		go func(file debrid.File) {
+		go func(file debridTypes.File) {
 			defer wg.Done()
 			defer func() { <-q.downloadSemaphore }()
 			filename := file.Link
@@ -149,7 +149,7 @@ func (q *QBit) ProcessSymlink(torrent *Torrent) (string, error) {
 	return q.createSymlinks(debridTorrent, torrentRclonePath, torrentFolder) // verify cos we're using external webdav
 }
 
-func (q *QBit) createSymlinksWebdav(debridTorrent *debrid.Torrent, rclonePath, torrentFolder string) (string, error) {
+func (q *QBit) createSymlinksWebdav(debridTorrent *debridTypes.Torrent, rclonePath, torrentFolder string) (string, error) {
 	files := debridTorrent.Files
 	symlinkPath := filepath.Join(q.DownloadFolder, debridTorrent.Arr.Name, torrentFolder) // /mnt/symlinks/{category}/MyTVShow/
 	err := os.MkdirAll(symlinkPath, os.ModePerm)
@@ -157,7 +157,7 @@ func (q *QBit) createSymlinksWebdav(debridTorrent *debrid.Torrent, rclonePath, t
 		return "", fmt.Errorf("failed to create directory: %s: %v", symlinkPath, err)
 	}
 
-	remainingFiles := make(map[string]debrid.File)
+	remainingFiles := make(map[string]debridTypes.File)
 	for _, file := range files {
 		remainingFiles[utils.EscapePath(file.Name)] = file
 	}
@@ -214,7 +214,7 @@ func (q *QBit) createSymlinksWebdav(debridTorrent *debrid.Torrent, rclonePath, t
 	return symlinkPath, nil
 }
 
-func (q *QBit) createSymlinks(debridTorrent *debrid.Torrent, rclonePath, torrentFolder string) (string, error) {
+func (q *QBit) createSymlinks(debridTorrent *debridTypes.Torrent, rclonePath, torrentFolder string) (string, error) {
 	files := debridTorrent.Files
 	symlinkPath := filepath.Join(q.DownloadFolder, debridTorrent.Arr.Name, torrentFolder) // /mnt/symlinks/{category}/MyTVShow/
 	err := os.MkdirAll(symlinkPath, os.ModePerm)
@@ -222,7 +222,7 @@ func (q *QBit) createSymlinks(debridTorrent *debrid.Torrent, rclonePath, torrent
 		return "", fmt.Errorf("failed to create directory: %s: %v", symlinkPath, err)
 	}
 
-	remainingFiles := make(map[string]debrid.File)
+	remainingFiles := make(map[string]debridTypes.File)
 	for _, file := range files {
 		remainingFiles[file.Path] = file
 	}
@@ -278,7 +278,7 @@ func (q *QBit) createSymlinks(debridTorrent *debrid.Torrent, rclonePath, torrent
 	return symlinkPath, nil
 }
 
-func (q *QBit) getTorrentPath(rclonePath string, debridTorrent *debrid.Torrent) (string, error) {
+func (q *QBit) getTorrentPath(rclonePath string, debridTorrent *debridTypes.Torrent) (string, error) {
 	for {
 		torrentPath, err := debridTorrent.GetMountFolder(rclonePath)
 		if err == nil {

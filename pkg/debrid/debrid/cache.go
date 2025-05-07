@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -49,15 +48,6 @@ type CachedTorrent struct {
 	DuplicateIds []string  `json:"duplicate_ids"`
 }
 
-func (ct *CachedTorrent) addDuplicateId(id string) {
-	if ct.DuplicateIds == nil {
-		ct.DuplicateIds = make([]string, 0)
-	}
-	if !slices.Contains(ct.DuplicateIds, id) {
-		ct.DuplicateIds = append(ct.DuplicateIds, id)
-	}
-}
-
 type downloadLinkCache struct {
 	Id        string
 	Link      string
@@ -93,9 +83,8 @@ type Cache struct {
 	folderNaming         WebDavFolderNaming
 
 	// monitors
-	repairRequest        sync.Map
-	failedToReinsert     sync.Map
-	downloadLinkRequests sync.Map
+	repairRequest    sync.Map
+	failedToReinsert sync.Map
 
 	// repair
 	repairChan chan RepairRequest
