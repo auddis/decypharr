@@ -14,7 +14,6 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -31,8 +30,6 @@ type Handler struct {
 	logger   zerolog.Logger
 	cache    *debrid.Cache
 	RootPath string
-
-	gzipPool sync.Pool
 }
 
 func NewHandler(name string, cache *debrid.Cache, logger zerolog.Logger) *Handler {
@@ -83,12 +80,23 @@ func (h *Handler) getRootPath() string {
 	return fmt.Sprintf(filepath.Join(string(os.PathSeparator), "webdav", "%s"), h.Name)
 }
 
-func (h *Handler) getTorrentsFolders() []os.FileInfo {
-	return h.cache.GetListing()
+func (h *Handler) getTorrentsFolders(folder string) []os.FileInfo {
+	return h.cache.GetListing(folder)
 }
 
 func (h *Handler) getParentItems() []string {
-	return []string{"__all__", "torrents", "version.txt"}
+	parents := []string{"__all__", "torrents"}
+
+	// Add user-defined parent items
+	for _, dir := range h.cache.GetCustomFolders() {
+		if dir != "" {
+			parents = append(parents, dir)
+		}
+	}
+
+	// version.txt
+	parents = append(parents, "version.txt")
+	return parents
 }
 
 func (h *Handler) getParentFiles() []os.FileInfo {
@@ -147,12 +155,12 @@ func (h *Handler) OpenFile(ctx context.Context, name string, flag int, perm os.F
 	}
 
 	// Single check for top-level folders
-	if h.isParentPath(name) {
+	if parent, ok := h.isParentPath(name); ok {
 		folderName := strings.TrimPrefix(name, rootDir)
 		folderName = strings.TrimPrefix(folderName, string(os.PathSeparator))
 
 		// Only fetcher the torrent folders once
-		children := h.getTorrentsFolders()
+		children := h.getTorrentsFolders(parent)
 
 		return &File{
 			cache:        h.cache,
@@ -167,8 +175,9 @@ func (h *Handler) OpenFile(ctx context.Context, name string, flag int, perm os.F
 
 	_path := strings.TrimPrefix(name, rootDir)
 	parts := strings.Split(strings.TrimPrefix(_path, string(os.PathSeparator)), string(os.PathSeparator))
+	parentFolder, _ := url.QueryUnescape(parts[0])
 
-	if len(parts) >= 2 && (utils.Contains(h.getParentItems(), parts[0])) {
+	if len(parts) >= 2 && (utils.Contains(h.getParentItems(), parentFolder)) {
 
 		torrentName := parts[1]
 		cachedTorrent := h.cache.GetTorrentByName(torrentName)
@@ -270,7 +279,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			r.Header.Set("Depth", "1")
 		}
 
-		if served := h.serveFromCacheIfValid(w, r, cleanPath); served {
+		cacheKey := fmt.Sprintf("%s:%s", cleanPath, r.Header.Get("Depth"))
+
+		if served := h.serveFromCacheIfValid(w, r, cacheKey); served {
 			return
 		}
 
@@ -287,11 +298,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		handler.ServeHTTP(responseRecorder, r)
 		responseData := responseRecorder.Body.Bytes()
-		gzippedData := request.Gzip(responseData, &h.gzipPool)
+		gzippedData := request.Gzip(responseData)
 
 		// Create compressed version
 
-		h.cache.PropfindResp.Store(cleanPath, debrid.PropfindResponse{
+		h.cache.PropfindResp.Store(cacheKey, debrid.PropfindResponse{
 			Data:        responseData,
 			GzippedData: gzippedData,
 			Ts:          time.Now(),
@@ -444,27 +455,27 @@ func getContentType(fileName string) string {
 	return contentType
 }
 
-func (h *Handler) isParentPath(urlPath string) bool {
+func (h *Handler) isParentPath(urlPath string) (string, bool) {
 	parents := h.getParentItems()
 	lastComponent := path.Base(urlPath)
 	for _, p := range parents {
 		if p == lastComponent {
-			return true
+			return p, true
 		}
 	}
-	return false
+	return "", false
 }
 
-func (h *Handler) serveFromCacheIfValid(w http.ResponseWriter, r *http.Request, urlPath string) bool {
-	respCache, ok := h.cache.PropfindResp.Load(urlPath)
+func (h *Handler) serveFromCacheIfValid(w http.ResponseWriter, r *http.Request, key string) bool {
+	respCache, ok := h.cache.PropfindResp.Load(key)
 	if !ok {
 		return false
 	}
 
-	ttl := h.getCacheTTL(urlPath)
+	ttl := h.getCacheTTL(r.URL.Path)
 
 	if time.Since(respCache.Ts) >= ttl {
-		h.cache.PropfindResp.Delete(urlPath)
+		h.cache.PropfindResp.Delete(key)
 		return false
 	}
 	w.Header().Set("Content-Type", "application/xml; charset=utf-8")

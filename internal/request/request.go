@@ -382,29 +382,13 @@ func JSONResponse(w http.ResponseWriter, data interface{}, code int) {
 	}
 }
 
-func Gzip(body []byte, pool *sync.Pool) []byte {
+func Gzip(body []byte) []byte {
 	if len(body) == 0 {
 		return nil
 	}
 
-	var (
-		buf *bytes.Buffer
-		ok  bool
-	)
-
 	// Check if the pool is nil
-	if pool == nil {
-		buf = bytes.NewBuffer(make([]byte, 0, len(body)))
-	} else {
-		buf, ok = pool.Get().(*bytes.Buffer)
-
-		if !ok || buf == nil {
-			buf = bytes.NewBuffer(make([]byte, 0, len(body)))
-		} else {
-			buf.Reset()
-		}
-		defer pool.Put(buf)
-	}
+	buf := bytes.NewBuffer(make([]byte, 0, len(body)))
 
 	gz, err := gzip.NewWriterLevel(buf, gzip.BestSpeed)
 	if err != nil {

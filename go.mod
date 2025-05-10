@@ -6,6 +6,7 @@ toolchain go1.24.3
 
 require (
 	github.com/anacrolix/torrent v1.55.0
+	github.com/beevik/etree v1.5.1
 	github.com/cavaliergopher/grab/v3 v3.0.1
 	github.com/go-chi/chi/v5 v5.1.0
 	github.com/go-co-op/gocron/v2 v2.16.1

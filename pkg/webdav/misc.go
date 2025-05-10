@@ -9,7 +9,6 @@ import (
 )
 
 // getName: Returns the torrent name and filename from the path
-// /webdav/alldebrid/__all__/TorrentName
 func getName(rootDir, path string) (string, string) {
 	path = strings.TrimPrefix(path, rootDir)
 	parts := strings.Split(strings.TrimPrefix(path, string(os.PathSeparator)), string(os.PathSeparator))
@@ -34,7 +33,7 @@ func isValidURL(str string) bool {
 //     use a short TTL.
 //   - Otherwise, for deeper (torrent folder) paths, use a longer TTL.
 func (h *Handler) getCacheTTL(urlPath string) time.Duration {
-	if h.isParentPath(urlPath) {
+	if _, ok := h.isParentPath(urlPath); ok {
 		return 30 * time.Second // Short TTL for parent folders
 	}
 	return 2 * time.Minute // Longer TTL for other paths

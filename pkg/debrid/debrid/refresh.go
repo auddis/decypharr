@@ -140,8 +140,16 @@ func (c *Cache) refreshRclone() error {
 			MaxIdleConnsPerHost: 5,
 		},
 	}
-	// Create form data
-	data := "dir=__all__&dir2=torrents"
+	data := ""
+	for index, dir := range c.GetDirectories() {
+		if dir != "" {
+			if index == 0 {
+				data += "dir=" + dir
+			} else {
+				data += "&dir" + fmt.Sprint(index) + "=" + dir
+			}
+		}
+	}
 
 	sendRequest := func(endpoint string) error {
 		req, err := http.NewRequest("POST", fmt.Sprintf("%s/%s", cfg.RcUrl, endpoint), strings.NewReader(data))

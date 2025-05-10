@@ -67,21 +67,6 @@ type Auth struct {
 	Password string `json:"password,omitempty"`
 }
 
-type WebDav struct {
-	TorrentsRefreshInterval      string `json:"torrents_refresh_interval,omitempty"`
-	DownloadLinksRefreshInterval string `json:"download_links_refresh_interval,omitempty"`
-	Workers                      int    `json:"workers,omitempty"`
-	AutoExpireLinksAfter         string `json:"auto_expire_links_after,omitempty"`
-
-	// Folder
-	FolderNaming string `json:"folder_naming,omitempty"`
-
-	// Rclone
-	RcUrl  string `json:"rc_url,omitempty"`
-	RcUser string `json:"rc_user,omitempty"`
-	RcPass string `json:"rc_pass,omitempty"`
-}
-
 type Config struct {
 	// server
 	BindAddress string `json:"bind_address,omitempty"`
@@ -212,7 +197,7 @@ func (c *Config) GetMinFileSize() int64 {
 	if c.MinFileSize == "" {
 		return 0
 	}
-	s, err := parseSize(c.MinFileSize)
+	s, err := ParseSize(c.MinFileSize)
 	if err != nil {
 		return 0
 	}
@@ -224,7 +209,7 @@ func (c *Config) GetMaxFileSize() int64 {
 	if c.MaxFileSize == "" {
 		return 0
 	}
-	s, err := parseSize(c.MaxFileSize)
+	s, err := ParseSize(c.MaxFileSize)
 	if err != nil {
 		return 0
 	}
@@ -307,6 +292,19 @@ func (c *Config) updateDebrid(d Debrid) Debrid {
 	if d.AutoExpireLinksAfter == "" {
 		d.AutoExpireLinksAfter = cmp.Or(c.WebDav.AutoExpireLinksAfter, "3d") // 2 days
 	}
+
+	// Merge debrid specified directories with global directories
+
+	directories := c.WebDav.Directories
+	if directories == nil {
+		directories = make(map[string]WebdavDirectories)
+	}
+
+	for name, dir := range d.Directories {
+		directories[name] = dir
+	}
+	d.Directories = directories
+
 	d.RcUrl = cmp.Or(d.RcUrl, c.WebDav.RcUrl)
 	d.RcUser = cmp.Or(d.RcUser, c.WebDav.RcUser)
 	d.RcPass = cmp.Or(d.RcPass, c.WebDav.RcPass)

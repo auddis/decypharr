@@ -2,7 +2,6 @@ package debrid
 
 import (
 	"bufio"
-	"bytes"
 	"cmp"
 	"context"
 	"errors"
@@ -11,6 +10,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -75,13 +75,11 @@ type Cache struct {
 	PropfindResp         *xsync.Map[string, PropfindResponse]
 	folderNaming         WebDavFolderNaming
 
-	// optimizers
-	xmlPool          sync.Pool
-	gzipPool         sync.Pool
 	listingDebouncer *utils.Debouncer[bool]
 	// monitors
-	repairRequest    sync.Map
-	failedToReinsert sync.Map
+	repairRequest        sync.Map
+	failedToReinsert     sync.Map
+	downloadLinkRequests sync.Map
 
 	// repair
 	repairChan chan RepairRequest
@@ -101,7 +99,8 @@ type Cache struct {
 	saveSemaphore chan struct{}
 	ctx           context.Context
 
-	config config.Debrid
+	config        config.Debrid
+	customFolders []string
 }
 
 func New(dc config.Debrid, client types.Client) *Cache {
@@ -113,10 +112,28 @@ func New(dc config.Debrid, client types.Client) *Cache {
 	if autoExpiresLinksAfter == 0 || err != nil {
 		autoExpiresLinksAfter = 48 * time.Hour
 	}
+	var customFolders []string
+	dirFilters := map[string][]directoryFilter{}
+	for name, value := range dc.Directories {
+		for filterType, v := range value.Filters {
+			df := directoryFilter{filterType: filterType, value: v}
+			switch filterType {
+			case filterByRegex, filterByNotRegex:
+				df.regex = regexp.MustCompile(v)
+			case filterBySizeGT, filterBySizeLT:
+				df.sizeThreshold, _ = config.ParseSize(v)
+			case filterBLastAdded:
+				df.ageThreshold, _ = time.ParseDuration(v)
+			}
+			dirFilters[name] = append(dirFilters[name], df)
+		}
+		customFolders = append(customFolders, name)
+
+	}
 	c := &Cache{
 		dir: filepath.Join(cfg.Path, "cache", dc.Name), // path to save cache files
 
-		torrents:                      newTorrentCache(),
+		torrents:                      newTorrentCache(dirFilters),
 		PropfindResp:                  xsync.NewMap[string, PropfindResponse](),
 		client:                        client,
 		logger:                        logger.New(fmt.Sprintf("%s-webdav", client.GetName())),
@@ -130,12 +147,8 @@ func New(dc config.Debrid, client types.Client) *Cache {
 		ctx:                           context.Background(),
 		scheduler:                     s,
 
-		config: dc,
-		xmlPool: sync.Pool{
-			New: func() interface{} {
-				return new(bytes.Buffer)
-			},
-		},
+		config:        dc,
+		customFolders: customFolders,
 	}
 	c.listingDebouncer = utils.NewDebouncer[bool](250*time.Millisecond, func(refreshRclone bool) {
 		c.RefreshListings(refreshRclone)
@@ -464,8 +477,23 @@ func (c *Cache) setTorrents(torrents map[string]*CachedTorrent, callback func())
 }
 
 // GetListing returns a sorted list of torrents(READ-ONLY)
-func (c *Cache) GetListing() []os.FileInfo {
-	return c.torrents.getListing()
+func (c *Cache) GetListing(folder string) []os.FileInfo {
+	switch folder {
+	case "__all__", "torrents":
+		return c.torrents.getListing()
+	default:
+		return c.torrents.getFolderListing(folder)
+	}
+}
+
+func (c *Cache) GetCustomFolders() []string {
+	return c.customFolders
+}
+
+func (c *Cache) GetDirectories() []string {
+	dirs := []string{"__all__", "torrents"}
+	dirs = append(dirs, c.customFolders...)
+	return dirs
 }
 
 func (c *Cache) Close() error {
