@@ -3,7 +3,6 @@ package webdav
 import (
 	"bytes"
 	"context"
-	"encoding/xml"
 	"fmt"
 	"html/template"
 	"io"
@@ -29,41 +28,6 @@ type Handler struct {
 	logger   zerolog.Logger
 	cache    *debrid.Cache
 	RootPath string
-}
-
-type DAVResponse struct {
-	XMLName  xml.Name `xml:"d:response"`
-	Href     string   `xml:"d:href"`
-	PropStat PropStat `xml:"d:propstat"`
-}
-
-type PropStat struct {
-	XMLName xml.Name `xml:"d:propstat"`
-	Prop    Prop     `xml:"d:prop"`
-	Status  string   `xml:"d:status"`
-}
-
-type Prop struct {
-	XMLName       xml.Name      `xml:"d:prop"`
-	ResourceType  *ResourceType `xml:"d:resourcetype,omitempty"`
-	LastModified  string        `xml:"d:getlastmodified,omitempty"`
-	ContentLength int64         `xml:"d:getcontentlength,omitempty"`
-	DisplayName   string        `xml:"d:displayname,omitempty"`
-}
-
-type ResourceType struct {
-	XMLName    xml.Name    `xml:"d:resourcetype"`
-	Collection *Collection `xml:"d:collection,omitempty"`
-}
-
-type Collection struct {
-	XMLName xml.Name `xml:"d:collection"`
-}
-
-type MultiStatus struct {
-	XMLName   xml.Name      `xml:"d:multistatus"`
-	Namespace string        `xml:"xmlns:d,attr"`
-	Responses []DAVResponse `xml:"d:response"`
 }
 
 func NewHandler(name string, cache *debrid.Cache, logger zerolog.Logger) *Handler {
@@ -539,103 +503,4 @@ func (h *Handler) handleOptions(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Allow", "OPTIONS, GET, HEAD, PUT, DELETE, MKCOL, COPY, MOVE, PROPFIND")
 	w.Header().Set("DAV", "1, 2")
 	w.WriteHeader(http.StatusOK)
-}
-
-func (h *Handler) handlePropfind(w http.ResponseWriter, r *http.Request) {
-	// Setup context for metadata only
-	ctx := context.WithValue(r.Context(), "metadataOnly", true)
-	r = r.WithContext(ctx)
-
-	// Determine depth (default "1")
-	depth := r.Header.Get("Depth")
-	if depth == "" {
-		depth = "1"
-	}
-
-	cleanPath := path.Clean(r.URL.Path)
-
-	// Build the list of entries
-	type entry struct {
-		href string
-		fi   os.FileInfo
-	}
-	var entries []entry
-
-	// Always include the resource itself
-	f, err := h.OpenFile(r.Context(), cleanPath, os.O_RDONLY, 0)
-	if err == nil {
-		defer f.Close()
-
-		if fi, err2 := f.Stat(); err2 == nil {
-			entries = append(entries, entry{
-				href: cleanPath,
-				fi:   fi,
-			})
-
-			// Add children if directory and depth isn't 0
-			if fi.IsDir() {
-				children := h.getChildren(cleanPath)
-				for _, child := range children {
-					entries = append(entries, entry{
-						href: path.Join("/", cleanPath, child.Name()) + "/",
-						fi:   child,
-					})
-				}
-			}
-		}
-	}
-
-	// Create MultiStatus response
-	multiStatus := MultiStatus{
-		Namespace: "DAV:",
-		Responses: []DAVResponse{},
-	}
-
-	// Add responses for each entry
-	for _, e := range entries {
-		var resourceType *ResourceType
-		var contentLength int64
-
-		if e.fi.IsDir() {
-			resourceType = &ResourceType{
-				Collection: &Collection{},
-			}
-		} else {
-			contentLength = e.fi.Size()
-		}
-
-		// Format href path properly
-		raw := e.href
-		u := &url.URL{Path: raw}
-		escaped := u.EscapedPath()
-
-		response := DAVResponse{
-			Href: escaped,
-			PropStat: PropStat{
-				Prop: Prop{
-					ResourceType:  resourceType,
-					LastModified:  e.fi.ModTime().Format("2006-01-02T15:04:05.000-07:00"),
-					ContentLength: contentLength,
-					DisplayName:   e.fi.Name(),
-				},
-				Status: "HTTP/1.1 200 OK",
-			},
-		}
-
-		multiStatus.Responses = append(multiStatus.Responses, response)
-	}
-
-	// Marshal to XML
-	body, err := xml.Marshal(multiStatus)
-	if err != nil {
-		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
-		return
-	}
-	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
-	w.Header().Set("Vary", "Accept-Encoding")
-
-	// Set status code
-	w.WriteHeader(207) // MultiStatus
-	_, _ = w.Write([]byte(xml.Header))
-	_, _ = w.Write(body)
 }

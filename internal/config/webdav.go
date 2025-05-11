@@ -15,9 +15,10 @@ type WebDav struct {
 	FolderNaming string `json:"folder_naming,omitempty"`
 
 	// Rclone
-	RcUrl  string `json:"rc_url,omitempty"`
-	RcUser string `json:"rc_user,omitempty"`
-	RcPass string `json:"rc_pass,omitempty"`
+	RcUrl         string `json:"rc_url,omitempty"`
+	RcUser        string `json:"rc_user,omitempty"`
+	RcPass        string `json:"rc_pass,omitempty"`
+	RcRefreshDirs string `json:"rc_refresh_dirs,omitempty"` // comma separated list of directories to refresh
 
 	// Directories
 	Directories map[string]WebdavDirectories `json:"directories,omitempty"`

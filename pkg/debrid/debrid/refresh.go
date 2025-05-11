@@ -138,12 +138,19 @@ func (c *Cache) refreshRclone() error {
 	}
 	// Create form data
 	data := ""
-	for index, dir := range c.GetDirectories() {
-		if dir != "" {
-			if index == 0 {
-				data += "dir=" + dir
-			} else {
-				data += "&dir" + fmt.Sprint(index+1) + "=" + dir
+	dirs := strings.FieldsFunc(cfg.RcRefreshDirs, func(r rune) bool {
+		return r == ',' || r == '&'
+	})
+	if len(dirs) == 0 {
+		data = "dir=__all__"
+	} else {
+		for index, dir := range dirs {
+			if dir != "" {
+				if index == 0 {
+					data += "dir=" + dir
+				} else {
+					data += "&dir" + fmt.Sprint(index+1) + "=" + dir
+				}
 			}
 		}
 	}

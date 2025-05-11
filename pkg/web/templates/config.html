@@ -372,13 +372,13 @@
     </div>
     <div class="row mt-3 webdav d-none">
         <h6 class="pb-2">Webdav</h6>
-        <div class="col-md-3 mb-3">
+        <div class="col-md-2 mb-3">
             <label class="form-label" for="debrid[${index}].torrents_refresh_interval">Torrents Refresh Interval</label>
             <input type="text" class="form-control webdav-field" name="debrid[${index}].torrents_refresh_interval" id="debrid[${index}].torrents_refresh_interval" placeholder="15s" value="15s">
             <small class="form-text text-muted">How often to refresh the torrents list from debrid(instant when using webdav)</small>
         </div>
-        <div class="col-md-3 mb-3">
-            <label class="form-label" for="debrid[${index}].download_links_refresh_interval">Download Links Refresh Interval</label>
+        <div class="col-md-2 mb-3">
+            <label class="form-label" for="debrid[${index}].download_links_refresh_interval">Links Refresh Interval</label>
             <input type="text" class="form-control webdav-field" name="debrid[${index}].download_links_refresh_interval" id="debrid[${index}].download_links_refresh_interval" placeholder="40m" value="40m">
             <small class="form-text text-muted">How often to refresh the download links list from debrid</small>
         </div>
@@ -386,6 +386,11 @@
             <label class="form-label" for="debrid[${index}].auto_expire_links_after">Expire Links After</label>
             <input type="text" class="form-control webdav-field" name="debrid[${index}].auto_expire_links_after" id="debrid[${index}].auto_expire_links_after" placeholder="3d" value="3d">
             <small class="form-text text-muted">How long to keep the links in the webdav before expiring</small>
+        </div>
+        <div class="col-md-2 mb-3">
+            <label class="form-label" for="debrid[${index}].workers">Number of Workers</label>
+            <input type="text" class="form-control webdav-field" name="debrid[${index}].workers" id="debrid[${index}].workers" placeholder="e.g., 50" value="50">
+            <small class="form-text text-muted">Number of workers to use for the webdav server(when refreshing)</small>
         </div>
         <div class="col-md-3 mb-3">
             <label class="form-label" for="debrid[${index}].folder_naming">Folder Naming Structure</label>
@@ -400,14 +405,14 @@
             <small class="form-text text-muted">How to name each torrent directory in the webdav</small>
         </div>
         <div class="col-md-3 mb-3">
-            <label class="form-label" for="debrid[${index}].workers">Number of Workers</label>
-            <input type="text" class="form-control webdav-field" name="debrid[${index}].workers" id="debrid[${index}].workers" placeholder="e.g., 50" value="50">
-            <small class="form-text text-muted">Number of workers to use for the webdav server(when refreshing)</small>
-        </div>
-        <div class="col-md-3 mb-3">
             <label class="form-label" for="debrid[${index}].rc_url">Rclone RC URL</label>
             <input type="text" class="form-control webdav-field" name="debrid[${index}].rc_url" id="debrid[${index}].rc_url" placeholder="e.g., http://localhost:9990">
             <small class="form-text text-muted">Rclone RC URL for the webdav server(speeds up import significantly)</small>
+        </div>
+        <div class="col-md-3 mb-3">
+            <label class="form-label" for="debrid[${index}].rc_refresh_dirs">Rclone RC Dirs</label>
+            <input type="text" class="form-control webdav-field" name="debrid[${index}].rc_refresh_dirs" id="debrid[${index}].rc_refresh_dirs">
+            <small class="form-text text-muted">Directories to refresh via RC(comma-seperated e.g. __all__, torrents) </small>
         </div>
         <div class="col-md-3 mb-3">
             <label class="form-label" for="debrid[${index}].rc_user">Rclone RC User</label>
@@ -1090,6 +1095,7 @@
                     debrid.rc_url = document.querySelector(`[name="debrid[${i}].rc_url"]`).value;
                     debrid.rc_user = document.querySelector(`[name="debrid[${i}].rc_user"]`).value;
                     debrid.rc_pass = document.querySelector(`[name="debrid[${i}].rc_pass"]`).value;
+                    debrid.rc_refresh_dirs = document.querySelector(`[name="debrid[${i}].rc_refresh_dirs"]`).value;
 
                     //custom folders
                     debrid.directories = {};
