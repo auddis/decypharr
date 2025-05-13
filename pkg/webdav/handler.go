@@ -269,7 +269,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			LockSystem: webdav.NewMemLS(),
 			Logger: func(r *http.Request, err error) {
 				if err != nil {
-					h.logger.Error().
+					h.logger.Trace().
 						Err(err).
 						Str("method", r.Method).
 						Str("path", r.URL.Path).

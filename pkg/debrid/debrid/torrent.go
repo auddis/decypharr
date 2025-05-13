@@ -182,6 +182,7 @@ func (tc *torrentCache) refreshListing() {
 		}
 		tc.folderListingMu.Unlock()
 	}()
+	wg.Done()
 
 	now := time.Now()
 	wg.Add(len(tc.directoriesFilters)) // for each directory filter

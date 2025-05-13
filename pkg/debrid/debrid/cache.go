@@ -49,6 +49,7 @@ func (c CachedTorrent) copy() CachedTorrent {
 		Torrent:    c.Torrent,
 		AddedOn:    c.AddedOn,
 		IsComplete: c.IsComplete,
+		Bad:        c.Bad,
 	}
 }
 
@@ -308,9 +309,6 @@ func (c *Cache) Sync() error {
 	newTorrents := make([]*types.Torrent, 0)
 	idStore := make(map[string]struct{}, totalTorrents)
 	for _, t := range torrents {
-		if _, exists := idStore[t.Id]; exists {
-			c.logger.Debug().Msgf("Torrent %s already exists in cache", t.Id)
-		}
 		idStore[t.Id] = struct{}{}
 		if _, ok := cachedTorrents[t.Id]; !ok {
 			newTorrents = append(newTorrents, t)
