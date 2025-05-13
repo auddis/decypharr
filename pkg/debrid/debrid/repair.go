@@ -34,22 +34,24 @@ func (r *reInsertRequest) Wait() (*CachedTorrent, error) {
 }
 
 func (c *Cache) markAsFailedToReinsert(torrentId string) {
-	currentCount := 0
-	if retryCount, ok := c.failedToReinsert.Load(torrentId); ok {
-		currentCount = retryCount.(int)
-	}
-
-	c.failedToReinsert.Store(torrentId, currentCount+1)
+	c.failedToReinsert.Store(torrentId, struct{}{})
 
 	// Remove the torrent from the directory if it has failed to reinsert, max retries are hardcoded to 5
-	if currentCount > 3 {
-		// Mark torrent as failed
-		if torrent, ok := c.torrents.getByID(torrentId); ok {
-			torrent.Bad = true
-			c.SaveTorrent(torrent)
-		}
+	if torrent, ok := c.torrents.getByID(torrentId); ok {
+		torrent.Bad = true
+		c.SaveTorrent(torrent)
 	}
+}
 
+func (c *Cache) markAsSuccessfullyReinserted(torrentId string) {
+	if _, ok := c.failedToReinsert.Load(torrentId); !ok {
+		return
+	}
+	c.failedToReinsert.Delete(torrentId)
+	if torrent, ok := c.torrents.getByID(torrentId); ok {
+		torrent.Bad = false
+		c.SaveTorrent(torrent)
+	}
 }
 
 func (c *Cache) IsTorrentBroken(t *CachedTorrent, filenames []string) bool {
@@ -230,7 +232,7 @@ func (c *Cache) reInsertTorrent(ct *CachedTorrent) (*CachedTorrent, error) {
 	}
 
 	req.Complete(ct, err)
-	c.failedToReinsert.Delete(oldID) // Delete the old torrent from the failed list
+	c.markAsSuccessfullyReinserted(oldID)
 
 	c.logger.Debug().Str("torrentId", torrent.Id).Msg("Torrent successfully reinserted")
 
@@ -240,5 +242,4 @@ func (c *Cache) reInsertTorrent(ct *CachedTorrent) (*CachedTorrent, error) {
 func (c *Cache) resetInvalidLinks() {
 	c.invalidDownloadLinks = sync.Map{}
 	c.client.ResetActiveDownloadKeys() // Reset the active download keys
-	c.failedToReinsert = sync.Map{}    // Reset the failed to reinsert map
 }
