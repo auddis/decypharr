@@ -1,6 +1,7 @@
 package debrid
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"github.com/sirrobot01/decypharr/internal/request"
@@ -122,12 +123,11 @@ func (c *Cache) IsTorrentBroken(t *CachedTorrent, filenames []string) bool {
 	return isBroken
 }
 
-func (c *Cache) repairWorker() {
+func (c *Cache) repairWorker(ctx context.Context) {
 	// This watches a channel for torrents to repair and can be cancelled via context
 	for {
 		select {
-		case <-c.ctx.Done():
-			// Context was cancelled, exit the goroutine
+		case <-ctx.Done():
 			return
 
 		case req, ok := <-c.repairChan:

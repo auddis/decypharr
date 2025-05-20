@@ -26,6 +26,13 @@ func newDownloadLinkCache() *downloadLinkCache {
 		data: make(map[string]linkCache),
 	}
 }
+
+func (c *downloadLinkCache) reset() {
+	c.mu.Lock()
+	c.data = make(map[string]linkCache)
+	c.mu.Unlock()
+}
+
 func (c *downloadLinkCache) Load(key string) (linkCache, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -155,14 +162,13 @@ func (c *Cache) fetchDownloadLink(torrentName, filename, fileLink string) (strin
 
 func (c *Cache) GenerateDownloadLinks(t CachedTorrent) {
 	if err := c.client.GenerateDownloadLinks(t.Torrent); err != nil {
-		c.logger.Error().Err(err).Msg("Failed to generate download links")
+		c.logger.Error().Err(err).Str("torrent", t.Name).Msg("Failed to generate download links")
 		return
 	}
 	for _, file := range t.Files {
 		if file.DownloadLink != nil {
 			c.updateDownloadLink(file.DownloadLink)
 		}
-
 	}
 	c.setTorrent(t, nil)
 }

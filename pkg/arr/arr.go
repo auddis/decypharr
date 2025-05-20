@@ -3,13 +3,12 @@ package arr
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
-	"github.com/goccy/go-json"
 	"github.com/rs/zerolog"
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/logger"
 	"github.com/sirrobot01/decypharr/internal/request"
-	"github.com/sirrobot01/decypharr/internal/utils"
 	"io"
 	"net/http"
 	"strconv"
@@ -122,6 +121,12 @@ type Storage struct {
 	logger zerolog.Logger
 }
 
+func (as *Storage) Cleanup() {
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	as.Arrs = make(map[string]*Arr)
+}
+
 func InferType(host, name string) Type {
 	switch {
 	case strings.Contains(host, "sonarr") || strings.Contains(name, "sonarr"):
@@ -183,10 +188,15 @@ func (as *Storage) Clear() {
 }
 
 func (as *Storage) StartSchedule(ctx context.Context) error {
-	// Schedule the cleanup job every 10 seconds
-	_, err := utils.ScheduleJob(ctx, "10s", nil, as.cleanupArrsQueue)
-	if err != nil {
-		return err
+
+	ticker := time.NewTicker(10 * time.Second)
+
+	select {
+	case <-ticker.C:
+		as.cleanupArrsQueue()
+	case <-ctx.Done():
+		ticker.Stop()
+		return nil
 	}
 	return nil
 }

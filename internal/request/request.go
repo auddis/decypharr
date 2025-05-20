@@ -5,8 +5,9 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/tls"
+	"encoding/json"
+	"errors"
 	"fmt"
-	"github.com/goccy/go-json"
 	"github.com/rs/zerolog"
 	"github.com/sirrobot01/decypharr/internal/logger"
 	"golang.org/x/net/proxy"
@@ -180,7 +181,7 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 		resp, err = c.doRequest(req)
 		if err != nil {
 			// Check if this is a network error that might be worth retrying
-			if attempt < c.maxRetries {
+			if isRetryableError(err) && attempt < c.maxRetries {
 				// Apply backoff with jitter
 				jitter := time.Duration(rand.Int63n(int64(backoff / 4)))
 				sleepTime := backoff + jitter
@@ -412,4 +413,31 @@ func Default() *Client {
 		instance = New()
 	})
 	return instance
+}
+
+func isRetryableError(err error) bool {
+	errString := err.Error()
+
+	// Connection reset and other network errors
+	if strings.Contains(errString, "connection reset by peer") ||
+		strings.Contains(errString, "read: connection reset") ||
+		strings.Contains(errString, "connection refused") ||
+		strings.Contains(errString, "network is unreachable") ||
+		strings.Contains(errString, "connection timed out") ||
+		strings.Contains(errString, "no such host") ||
+		strings.Contains(errString, "i/o timeout") ||
+		strings.Contains(errString, "unexpected EOF") ||
+		strings.Contains(errString, "TLS handshake timeout") {
+		return true
+	}
+
+	// Check for net.Error type which can provide more information
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		// Retry on timeout errors and temporary errors
+		return netErr.Timeout() || netErr.Temporary()
+	}
+
+	// Not a retryable error
+	return false
 }

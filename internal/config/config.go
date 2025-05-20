@@ -2,9 +2,9 @@ package config
 
 import (
 	"cmp"
+	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/goccy/go-json"
 	"os"
 	"path/filepath"
 	"runtime"

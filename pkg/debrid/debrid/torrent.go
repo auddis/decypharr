@@ -73,6 +73,22 @@ func newTorrentCache(dirFilters map[string][]directoryFilter) *torrentCache {
 	return tc
 }
 
+func (tc *torrentCache) reset() {
+	tc.mu.Lock()
+	tc.byID = make(map[string]CachedTorrent)
+	tc.byName = make(map[string]CachedTorrent)
+	tc.mu.Unlock()
+
+	// reset the sorted listing
+	tc.sortNeeded.Store(false)
+	tc.listing.Store(make([]os.FileInfo, 0))
+
+	// reset any per-folder views
+	tc.folderListingMu.Lock()
+	tc.folderListing = make(map[string][]os.FileInfo)
+	tc.folderListingMu.Unlock()
+}
+
 func (tc *torrentCache) getByID(id string) (CachedTorrent, bool) {
 	tc.mu.Lock()
 	defer tc.mu.Unlock()
@@ -251,20 +267,10 @@ func (tc *torrentCache) getAll() map[string]CachedTorrent {
 	tc.mu.Lock()
 	defer tc.mu.Unlock()
 	result := make(map[string]CachedTorrent)
-	for name, torrent := range tc.byName {
+	for name, torrent := range tc.byID {
 		result[name] = torrent
 	}
 	return result
-}
-
-func (tc *torrentCache) getAllIDs() []string {
-	tc.mu.Lock()
-	defer tc.mu.Unlock()
-	ids := make([]string, 0, len(tc.byID))
-	for id := range tc.byID {
-		ids = append(ids, id)
-	}
-	return ids
 }
 
 func (tc *torrentCache) getIdMaps() map[string]struct{} {

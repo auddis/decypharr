@@ -16,8 +16,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"encoding/json"
 	"github.com/go-co-op/gocron/v2"
-	"github.com/goccy/go-json"
 	"github.com/rs/zerolog"
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/logger"
@@ -85,6 +85,9 @@ type Cache struct {
 	// repair
 	repairChan chan RepairRequest
 
+	// readiness
+	ready chan struct{}
+
 	// config
 	workers                       int
 	torrentRefreshInterval        string
@@ -95,10 +98,10 @@ type Cache struct {
 	downloadLinksRefreshMu sync.RWMutex // for refreshing download links
 	torrentsRefreshMu      sync.RWMutex // for refreshing torrents
 
-	scheduler gocron.Scheduler
+	scheduler    gocron.Scheduler
+	cetScheduler gocron.Scheduler
 
 	saveSemaphore chan struct{}
-	ctx           context.Context
 
 	config        config.Debrid
 	customFolders []string
@@ -107,7 +110,8 @@ type Cache struct {
 func New(dc config.Debrid, client types.Client) *Cache {
 	cfg := config.Get()
 	cet, _ := time.LoadLocation("CET")
-	s, _ := gocron.NewScheduler(gocron.WithLocation(cet))
+	cetSc, _ := gocron.NewScheduler(gocron.WithLocation(cet))
+	scheduler, _ := gocron.NewScheduler(gocron.WithLocation(time.Local))
 
 	autoExpiresLinksAfter, err := time.ParseDuration(dc.AutoExpireLinksAfter)
 	if autoExpiresLinksAfter == 0 || err != nil {
@@ -145,54 +149,111 @@ func New(dc config.Debrid, client types.Client) *Cache {
 		folderNaming:                  WebDavFolderNaming(dc.FolderNaming),
 		autoExpiresLinksAfterDuration: autoExpiresLinksAfter,
 		saveSemaphore:                 make(chan struct{}, 50),
-		ctx:                           context.Background(),
-		scheduler:                     s,
+		cetScheduler:                  cetSc,
+		scheduler:                     scheduler,
 
 		config:        dc,
 		customFolders: customFolders,
+
+		ready: make(chan struct{}),
 	}
+
 	c.listingDebouncer = utils.NewDebouncer[bool](100*time.Millisecond, func(refreshRclone bool) {
 		c.RefreshListings(refreshRclone)
 	})
 	return c
 }
 
+func (c *Cache) IsReady() chan struct{} {
+	return c.ready
+}
+
+// Reset clears all internal state so the Cache can be reused without leaks.
+// Call this after stopping the old Cache (so no goroutines are holding references),
+// and before you discard the instance on a restart.
+func (c *Cache) Reset() {
+
+	if err := c.scheduler.StopJobs(); err != nil {
+		c.logger.Error().Err(err).Msg("Failed to stop scheduler jobs")
+	}
+
+	if err := c.scheduler.Shutdown(); err != nil {
+		c.logger.Error().Err(err).Msg("Failed to stop scheduler")
+	}
+
+	// Stop the listing debouncer
+	c.listingDebouncer.Stop()
+
+	// Close the repair channel
+	close(c.repairChan)
+
+	// 1. Reset torrent storage
+	c.torrents.reset()
+
+	// 2. Reset download-link cache
+	c.downloadLinks.reset()
+
+	// 3. Clear any sync.Maps
+	c.invalidDownloadLinks = sync.Map{}
+	c.repairRequest = sync.Map{}
+	c.failedToReinsert = sync.Map{}
+	c.downloadLinkRequests = sync.Map{}
+
+	// 5. Rebuild the listing debouncer
+	c.listingDebouncer = utils.NewDebouncer[bool](
+		100*time.Millisecond,
+		func(refreshRclone bool) {
+			c.RefreshListings(refreshRclone)
+		},
+	)
+
+	// 6. Reset repair channel so the next Start() can spin it up
+	c.repairChan = make(chan RepairRequest, 100)
+}
+
 func (c *Cache) Start(ctx context.Context) error {
 	if err := os.MkdirAll(c.dir, 0755); err != nil {
 		return fmt.Errorf("failed to create cache directory: %w", err)
 	}
-	c.ctx = ctx
 
-	if err := c.Sync(); err != nil {
+	if err := c.Sync(ctx); err != nil {
 		return fmt.Errorf("failed to sync cache: %w", err)
 	}
 
 	// initial download links
-	go func() {
-		c.refreshDownloadLinks()
-	}()
+	go c.refreshDownloadLinks(ctx)
 
-	if err := c.StartSchedule(); err != nil {
+	if err := c.StartSchedule(ctx); err != nil {
 		c.logger.Error().Err(err).Msg("Failed to start cache worker")
 	}
 
 	c.repairChan = make(chan RepairRequest, 100)
-	go c.repairWorker()
+	go c.repairWorker(ctx)
+
+	// Fire the ready channel
+	close(c.ready)
+	cfg := config.Get()
+	name := c.client.GetName()
+	addr := cfg.BindAddress + ":" + cfg.Port + cfg.URLBase + "webdav/" + name + "/"
+	c.logger.Info().Msgf("%s WebDav server running at %s", name, addr)
+
+	<-ctx.Done()
+	c.logger.Info().Msgf("Stopping %s WebDav server", name)
+	c.Reset()
 
 	return nil
 }
 
-func (c *Cache) load() (map[string]CachedTorrent, error) {
-	torrents := make(map[string]CachedTorrent)
+func (c *Cache) load(ctx context.Context) (map[string]CachedTorrent, error) {
 	mu := sync.Mutex{}
 
 	if err := os.MkdirAll(c.dir, 0755); err != nil {
-		return torrents, fmt.Errorf("failed to create cache directory: %w", err)
+		return nil, fmt.Errorf("failed to create cache directory: %w", err)
 	}
 
 	files, err := os.ReadDir(c.dir)
 	if err != nil {
-		return torrents, fmt.Errorf("failed to read cache directory: %w", err)
+		return nil, fmt.Errorf("failed to read cache directory: %w", err)
 	}
 
 	// Get only json files
@@ -204,7 +265,7 @@ func (c *Cache) load() (map[string]CachedTorrent, error) {
 	}
 
 	if len(jsonFiles) == 0 {
-		return torrents, nil
+		return nil, nil
 	}
 
 	// Create channels with appropriate buffering
@@ -212,6 +273,8 @@ func (c *Cache) load() (map[string]CachedTorrent, error) {
 
 	// Create a wait group for workers
 	var wg sync.WaitGroup
+
+	torrents := make(map[string]CachedTorrent, len(jsonFiles))
 
 	// Start workers
 	for i := 0; i < c.workers; i++ {
@@ -272,7 +335,7 @@ func (c *Cache) load() (map[string]CachedTorrent, error) {
 	// Feed work to workers
 	for _, file := range jsonFiles {
 		select {
-		case <-c.ctx.Done():
+		case <-ctx.Done():
 			break // Context cancelled
 		default:
 			workChan <- file
@@ -288,13 +351,8 @@ func (c *Cache) load() (map[string]CachedTorrent, error) {
 	return torrents, nil
 }
 
-func (c *Cache) Sync() error {
-	cfg := config.Get()
-	name := c.client.GetName()
-	addr := cfg.BindAddress + ":" + cfg.Port + cfg.URLBase + "webdav/" + name + "/"
-
-	defer c.logger.Info().Msgf("%s WebDav server running at %s", name, addr)
-	cachedTorrents, err := c.load()
+func (c *Cache) Sync(ctx context.Context) error {
+	cachedTorrents, err := c.load(ctx)
 	if err != nil {
 		c.logger.Error().Err(err).Msg("Failed to load cache")
 	}
@@ -342,7 +400,7 @@ func (c *Cache) Sync() error {
 
 	if len(newTorrents) > 0 {
 		c.logger.Info().Msgf("Found %d new torrents", len(newTorrents))
-		if err := c.sync(newTorrents); err != nil {
+		if err := c.sync(ctx, newTorrents); err != nil {
 			return fmt.Errorf("failed to sync torrents: %v", err)
 		}
 	}
@@ -350,7 +408,7 @@ func (c *Cache) Sync() error {
 	return nil
 }
 
-func (c *Cache) sync(torrents []*types.Torrent) error {
+func (c *Cache) sync(ctx context.Context, torrents []*types.Torrent) error {
 
 	// Create channels with appropriate buffering
 	workChan := make(chan *types.Torrent, min(c.workers, len(torrents)))
@@ -384,7 +442,7 @@ func (c *Cache) sync(torrents []*types.Torrent) error {
 						c.logger.Info().Msgf("Progress: %d/%d torrents processed", count, len(torrents))
 					}
 
-				case <-c.ctx.Done():
+				case <-ctx.Done():
 					return // Context cancelled, exit goroutine
 				}
 			}
@@ -396,7 +454,7 @@ func (c *Cache) sync(torrents []*types.Torrent) error {
 		select {
 		case workChan <- t:
 			// Work sent successfully
-		case <-c.ctx.Done():
+		case <-ctx.Done():
 			break // Context cancelled
 		}
 	}
@@ -443,7 +501,7 @@ func (c *Cache) setTorrent(t CachedTorrent, callback func(torrent CachedTorrent)
 		updatedTorrent.Files = mergedFiles
 	}
 	c.torrents.set(torrentName, t, updatedTorrent)
-	c.SaveTorrent(updatedTorrent)
+	c.SaveTorrent(t)
 	if callback != nil {
 		callback(updatedTorrent)
 	}

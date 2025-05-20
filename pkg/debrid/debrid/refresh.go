@@ -1,6 +1,7 @@
 package debrid
 
 import (
+	"context"
 	"fmt"
 	"github.com/sirrobot01/decypharr/pkg/debrid/types"
 	"io"
@@ -34,24 +35,22 @@ func (c *Cache) RefreshListings(refreshRclone bool) {
 
 	if refreshRclone {
 		if err := c.refreshRclone(); err != nil {
-			c.logger.Trace().Err(err).Msg("Failed to refresh rclone") // silent error
+			c.logger.Error().Err(err).Msg("Failed to refresh rclone") // silent error
 		}
 	}
 }
 
-func (c *Cache) refreshTorrents() {
-	// Use a mutex to prevent concurrent refreshes
-	if c.torrentsRefreshMu.TryLock() {
-		defer c.torrentsRefreshMu.Unlock()
-	} else {
-		return
-	}
-
+func (c *Cache) refreshTorrents(ctx context.Context) {
 	select {
-	case <-c.ctx.Done():
+	case <-ctx.Done():
 		return
 	default:
 	}
+
+	if !c.torrentsRefreshMu.TryLock() {
+		return
+	}
+	defer c.torrentsRefreshMu.Unlock()
 
 	// Get all torrents from the debrid service
 	debTorrents, err := c.client.GetTorrents()
@@ -72,7 +71,8 @@ func (c *Cache) refreshTorrents() {
 
 	// Let's implement deleting torrents removed from debrid
 	deletedTorrents := make([]string, 0)
-	for _, id := range c.torrents.getAllIDs() {
+	cachedTorrents := c.torrents.getIdMaps()
+	for id := range cachedTorrents {
 		if _, exists := currentTorrentIds[id]; !exists {
 			deletedTorrents = append(deletedTorrents, id)
 		}
@@ -83,9 +83,8 @@ func (c *Cache) refreshTorrents() {
 	}
 
 	newTorrents := make([]*types.Torrent, 0)
-	cachedIdsMaps := c.torrents.getIdMaps()
 	for _, t := range debTorrents {
-		if _, exists := cachedIdsMaps[t.Id]; !exists {
+		if _, exists := cachedTorrents[t.Id]; !exists {
 			newTorrents = append(newTorrents, t)
 		}
 	}
@@ -128,12 +127,6 @@ func (c *Cache) refreshTorrents() {
 
 func (c *Cache) refreshRclone() error {
 	cfg := c.config
-
-	select {
-	case <-c.ctx.Done():
-		return nil
-	default:
-	}
 
 	if cfg.RcUrl == "" {
 		return nil
@@ -214,12 +207,6 @@ func (c *Cache) refreshTorrent(torrentId string) *CachedTorrent {
 		return nil
 	}
 
-	select {
-	case <-c.ctx.Done():
-		return nil
-	default:
-	}
-
 	torrent, err := c.client.GetTorrent(torrentId)
 	if err != nil {
 		c.logger.Error().Err(err).Msgf("Failed to get torrent %s", torrentId)
@@ -241,18 +228,18 @@ func (c *Cache) refreshTorrent(torrentId string) *CachedTorrent {
 	return &ct
 }
 
-func (c *Cache) refreshDownloadLinks() {
-	if c.downloadLinksRefreshMu.TryLock() {
-		defer c.downloadLinksRefreshMu.Unlock()
-	} else {
-		return
-	}
+func (c *Cache) refreshDownloadLinks(ctx context.Context) {
 
 	select {
-	case <-c.ctx.Done():
+	case <-ctx.Done():
 		return
 	default:
 	}
+
+	if !c.downloadLinksRefreshMu.TryLock() {
+		return
+	}
+	defer c.downloadLinksRefreshMu.Unlock()
 
 	downloadLinks, err := c.client.GetDownloads()
 

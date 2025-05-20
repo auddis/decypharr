@@ -33,6 +33,17 @@ func GetService() *Service {
 }
 
 func Reset() {
+	if instance != nil {
+		if instance.Debrid != nil {
+			instance.Debrid.Reset()
+		}
+		if instance.Arr != nil {
+			//instance.Arr.Reset()
+		}
+		if instance.Repair != nil {
+			//instance.Repair.Reset()
+		}
+	}
 	once = sync.Once{}
 	instance = nil
 }

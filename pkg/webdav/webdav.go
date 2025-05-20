@@ -5,13 +5,17 @@ import (
 	"embed"
 	"fmt"
 	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/pkg/service"
 	"html/template"
 	"net/http"
 	"net/url"
+	"os"
+	"path"
 	"strings"
 	"sync"
+	"time"
 )
 
 //go:embed templates/*
@@ -70,9 +74,18 @@ var (
 	tplDirectory = template.Must(template.New("").Funcs(funcMap).ParseFS(templatesFS, "templates/directory.html"))
 )
 
+func init() {
+	chi.RegisterMethod("PROPFIND")
+	chi.RegisterMethod("PROPPATCH")
+	chi.RegisterMethod("MKCOL")
+	chi.RegisterMethod("COPY")
+	chi.RegisterMethod("MOVE")
+	chi.RegisterMethod("LOCK")
+	chi.RegisterMethod("UNLOCK")
+}
+
 type WebDav struct {
 	Handlers []*Handler
-	ready    chan struct{}
 	URLBase  string
 }
 
@@ -81,7 +94,6 @@ func New() *WebDav {
 	urlBase := config.Get().URLBase
 	w := &WebDav{
 		Handlers: make([]*Handler, 0),
-		ready:    make(chan struct{}),
 		URLBase:  urlBase,
 	}
 	for name, c := range svc.Debrid.Caches {
@@ -92,31 +104,9 @@ func New() *WebDav {
 }
 
 func (wd *WebDav) Routes() http.Handler {
-	chi.RegisterMethod("PROPFIND")
-	chi.RegisterMethod("PROPPATCH")
-	chi.RegisterMethod("MKCOL")
-	chi.RegisterMethod("COPY")
-	chi.RegisterMethod("MOVE")
-	chi.RegisterMethod("LOCK")
-	chi.RegisterMethod("UNLOCK")
 	wr := chi.NewRouter()
+	wr.Use(middleware.StripSlashes)
 	wr.Use(wd.commonMiddleware)
-
-	// Create a readiness check middleware
-	readinessMiddleware := func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			select {
-			case <-wd.ready:
-				// WebDAV is ready, proceed
-				next.ServeHTTP(w, r)
-			default:
-				// WebDAV is still initializing
-				w.Header().Set("Retry-After", "10")
-				http.Error(w, "WebDAV service is initializing, please try again shortly", http.StatusServiceUnavailable)
-			}
-		})
-	}
-	wr.Use(readinessMiddleware)
 
 	wd.setupRootHandler(wr)
 	wd.mountHandlers(wr)
@@ -145,9 +135,6 @@ func (wd *WebDav) Start(ctx context.Context) error {
 	go func() {
 		wg.Wait()
 		close(errChan)
-
-		// Signal that WebDAV is ready
-		close(wd.ready)
 	}()
 
 	// Collect all errors
@@ -171,7 +158,8 @@ func (wd *WebDav) mountHandlers(r chi.Router) {
 }
 
 func (wd *WebDav) setupRootHandler(r chi.Router) {
-	r.Get("/", wd.handleRoot())
+	r.Get("/", wd.handleGetRoot())
+	r.MethodFunc("PROPFIND", "/", wd.handleWebdavRoot())
 }
 
 func (wd *WebDav) commonMiddleware(next http.Handler) http.Handler {
@@ -186,7 +174,7 @@ func (wd *WebDav) commonMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-func (wd *WebDav) handleRoot() http.HandlerFunc {
+func (wd *WebDav) handleGetRoot() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 
@@ -200,5 +188,30 @@ func (wd *WebDav) handleRoot() http.HandlerFunc {
 		if err := tplRoot.Execute(w, data); err != nil {
 			return
 		}
+	}
+}
+
+func (wd *WebDav) handleWebdavRoot() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		fi := &FileInfo{
+			name:    "/",
+			size:    0,
+			mode:    0755 | os.ModeDir,
+			modTime: time.Now(),
+			isDir:   true,
+		}
+		children := make([]os.FileInfo, 0, len(wd.Handlers))
+		for _, h := range wd.Handlers {
+			children = append(children, &FileInfo{
+				name:    h.Name,
+				size:    0,
+				mode:    0755 | os.ModeDir,
+				modTime: time.Now(),
+				isDir:   true,
+			})
+		}
+		sb := filesToXML(path.Clean(r.URL.Path), fi, children)
+		writeXml(w, http.StatusMultiStatus, sb)
+
 	}
 }

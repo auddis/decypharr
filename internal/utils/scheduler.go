@@ -10,29 +10,27 @@ import (
 	"time"
 )
 
-func ScheduleJob(ctx context.Context, interval string, loc *time.Location, jobFunc func()) (gocron.Job, error) {
+func ScheduleJob(ctx context.Context, interval string, loc *time.Location, jobFunc func()) (gocron.Scheduler, error) {
 	if loc == nil {
 		loc = time.Local
 	}
-	var job gocron.Job
 	s, err := gocron.NewScheduler(gocron.WithLocation(loc))
 	if err != nil {
-		return job, fmt.Errorf("failed to create scheduler: %w", err)
+		return s, fmt.Errorf("failed to create scheduler: %w", err)
 	}
-	jd, err := convertToJD(interval)
+	jd, err := ConvertToJobDef(interval)
 	if err != nil {
-		return job, fmt.Errorf("failed to convert interval to job definition: %w", err)
+		return s, fmt.Errorf("failed to convert interval to job definition: %w", err)
 	}
 	// Schedule the job
-	if job, err = s.NewJob(jd, gocron.NewTask(jobFunc), gocron.WithContext(ctx)); err != nil {
-		return job, fmt.Errorf("failed to create job: %w", err)
+	if _, err = s.NewJob(jd, gocron.NewTask(jobFunc), gocron.WithContext(ctx)); err != nil {
+		return s, fmt.Errorf("failed to create job: %w", err)
 	}
-	s.Start()
-	return job, nil
+	return s, nil
 }
 
 // ConvertToJobDef converts a string interval to a gocron.JobDefinition.
-func convertToJD(interval string) (gocron.JobDefinition, error) {
+func ConvertToJobDef(interval string) (gocron.JobDefinition, error) {
 	// Parse the interval string
 	// Interval could be in the format "1h", "30m", "15s" or "1h30m" or "04:05"
 	var jd gocron.JobDefinition

@@ -31,3 +31,13 @@ func (d *Debouncer[T]) Call(arg T) {
 		d.caller(arg)
 	})
 }
+
+func (d *Debouncer[T]) Stop() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if d.timer != nil {
+		d.timer.Stop()
+		d.timer = nil
+	}
+}

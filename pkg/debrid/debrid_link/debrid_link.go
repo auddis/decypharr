@@ -2,8 +2,8 @@ package debrid_link
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
-	"github.com/goccy/go-json"
 	"github.com/rs/zerolog"
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/logger"

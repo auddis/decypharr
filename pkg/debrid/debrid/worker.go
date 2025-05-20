@@ -1,32 +1,60 @@
 package debrid
 
 import (
+	"context"
+	"github.com/go-co-op/gocron/v2"
 	"github.com/sirrobot01/decypharr/internal/utils"
-	"time"
 )
 
-func (c *Cache) StartSchedule() error {
+func (c *Cache) StartSchedule(ctx context.Context) error {
 	// For now, we just want to refresh the listing and download links
 
-	if _, err := utils.ScheduleJob(c.ctx, c.downloadLinksRefreshInterval, nil, c.refreshDownloadLinks); err != nil {
-		c.logger.Error().Err(err).Msg("Failed to add download link refresh job")
+	// Schedule download link refresh job
+	if jd, err := utils.ConvertToJobDef(c.downloadLinksRefreshInterval); err != nil {
+		c.logger.Error().Err(err).Msg("Failed to convert download link refresh interval to job definition")
 	} else {
-		c.logger.Debug().Msgf("Download link refresh job scheduled for every %s", c.downloadLinksRefreshInterval)
+		// Schedule the job
+		if _, err := c.scheduler.NewJob(jd, gocron.NewTask(func() {
+			c.refreshDownloadLinks(ctx)
+		}), gocron.WithContext(ctx)); err != nil {
+			c.logger.Error().Err(err).Msg("Failed to create download link refresh job")
+		} else {
+			c.logger.Debug().Msgf("Download link refresh job scheduled for every %s", c.downloadLinksRefreshInterval)
+		}
 	}
 
-	if _, err := utils.ScheduleJob(c.ctx, c.torrentRefreshInterval, nil, c.refreshTorrents); err != nil {
-		c.logger.Error().Err(err).Msg("Failed to add torrent refresh job")
+	// Schedule torrent refresh job
+	if jd, err := utils.ConvertToJobDef(c.torrentRefreshInterval); err != nil {
+		c.logger.Error().Err(err).Msg("Failed to convert torrent refresh interval to job definition")
 	} else {
-		c.logger.Debug().Msgf("Torrent refresh job scheduled for every %s", c.torrentRefreshInterval)
+		// Schedule the job
+		if _, err := c.scheduler.NewJob(jd, gocron.NewTask(func() {
+			c.refreshTorrents(ctx)
+		}), gocron.WithContext(ctx)); err != nil {
+			c.logger.Error().Err(err).Msg("Failed to create torrent refresh job")
+		} else {
+			c.logger.Debug().Msgf("Torrent refresh job scheduled for every %s", c.torrentRefreshInterval)
+		}
 	}
 
 	// Schedule the reset invalid links job
 	// This job will run every at 00:00 CET
 	// and reset the invalid links in the cache
-	cet, _ := time.LoadLocation("CET")
-	if _, err := utils.ScheduleJob(c.ctx, "00:00", cet, c.resetInvalidLinks); err != nil {
-		c.logger.Error().Err(err).Msg("Failed to add reset invalid links job")
+	if jd, err := utils.ConvertToJobDef("00:00"); err != nil {
+		c.logger.Error().Err(err).Msg("Failed to convert link reset interval to job definition")
+	} else {
+		// Schedule the job
+		if _, err := c.cetScheduler.NewJob(jd, gocron.NewTask(func() {
+			c.resetInvalidLinks()
+		}), gocron.WithContext(ctx)); err != nil {
+			c.logger.Error().Err(err).Msg("Failed to create link reset job")
+		} else {
+			c.logger.Debug().Msgf("Link reset job scheduled for every midnight, CET")
+		}
 	}
 
+	// Start the scheduler
+	c.scheduler.Start()
+	c.cetScheduler.Start()
 	return nil
 }
