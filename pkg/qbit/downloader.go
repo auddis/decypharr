@@ -3,10 +3,10 @@ package qbit
 import (
 	"fmt"
 	"github.com/cavaliergopher/grab/v3"
-	"github.com/sirrobot01/decypharr/internal/request"
 	"github.com/sirrobot01/decypharr/internal/utils"
 	debridTypes "github.com/sirrobot01/decypharr/pkg/debrid/types"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sync"
@@ -20,7 +20,7 @@ func Download(client *grab.Client, url, filename string, progressCallback func(i
 	}
 	resp := client.Do(req)
 
-	t := time.NewTicker(time.Second)
+	t := time.NewTicker(time.Second * 2)
 	defer t.Stop()
 
 	var lastReported int64
@@ -92,9 +92,14 @@ func (q *QBit) downloadFiles(torrent *Torrent, parent string) {
 		q.UpdateTorrentMin(torrent, debridTorrent)
 	}
 	client := &grab.Client{
-		UserAgent:  "Decypharr[QBitTorrent]",
-		HTTPClient: request.New(request.WithTimeout(0)),
+		UserAgent: "Decypharr[QBitTorrent]",
+		HTTPClient: &http.Client{
+			Transport: &http.Transport{
+				Proxy: http.ProxyFromEnvironment,
+			},
+		},
 	}
+	errChan := make(chan error, len(debridTorrent.Files))
 	for _, file := range debridTorrent.Files {
 		if file.DownloadLink == nil {
 			q.logger.Info().Msgf("No download link found for %s", file.Name)
@@ -116,12 +121,25 @@ func (q *QBit) downloadFiles(torrent *Torrent, parent string) {
 
 			if err != nil {
 				q.logger.Error().Msgf("Failed to download %s: %v", filename, err)
+				errChan <- err
 			} else {
 				q.logger.Info().Msgf("Downloaded %s", filename)
 			}
 		}(file)
 	}
 	wg.Wait()
+
+	close(errChan)
+	var errors []error
+	for err := range errChan {
+		if err != nil {
+			errors = append(errors, err)
+		}
+	}
+	if len(errors) > 0 {
+		q.logger.Error().Msgf("Errors occurred during download: %v", errors)
+		return
+	}
 	q.logger.Info().Msgf("Downloaded all files for %s", debridTorrent.Name)
 }
 

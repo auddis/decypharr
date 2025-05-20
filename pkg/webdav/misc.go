@@ -1,8 +1,6 @@
 package webdav
 
 import (
-	"github.com/go-chi/chi/v5"
-	"github.com/sirrobot01/decypharr/internal/utils"
 	"github.com/stanNthe5/stringbuf"
 	"net/http"
 	"net/url"
@@ -145,20 +143,4 @@ func writeXml(w http.ResponseWriter, status int, buf stringbuf.StringBuf) {
 	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
 	w.WriteHeader(status)
 	_, _ = w.Write(buf.Bytes())
-}
-
-func getParam(r *http.Request, key string) string {
-	if r.URL == nil || r.URL.Query() == nil {
-		return ""
-	}
-	if v := chi.URLParam(r, key); v != "" {
-		return utils.PathUnescape(v)
-	}
-	if v := r.URL.Query().Get(key); v != "" {
-		return utils.PathUnescape(v)
-	}
-	if v := r.FormValue(key); v != "" {
-		return utils.PathUnescape(v)
-	}
-	return ""
 }

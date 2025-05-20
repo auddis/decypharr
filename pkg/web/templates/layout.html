@@ -200,8 +200,15 @@
 
     window.urlBase = "{{.URLBase}}";
 
-    function joinURL(...segments) {
-        return segments.join('/').replace(/[/]+/g, '/').replace(/^(.+):\//, '$1://').replace(/^file:/, 'file:/').replace(/\/(?=[?&#])/g, '').replace(/\?/g, '&');
+    function joinURL(base, path) {
+        if (!base.endsWith('/')) {
+            base += '/';
+        }
+        if (path.startsWith('/')) {
+            path = path.substring(1);
+        }
+        return base + path;
+
     }
 
     function fetcher(endpoint, options = {}) {

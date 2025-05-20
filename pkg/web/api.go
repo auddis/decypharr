@@ -151,7 +151,7 @@ func (ui *Handler) handleGetTorrents(w http.ResponseWriter, r *http.Request) {
 
 func (ui *Handler) handleDeleteTorrent(w http.ResponseWriter, r *http.Request) {
 	hash := chi.URLParam(r, "hash")
-	category := r.URL.Query().Get("category")
+	category := chi.URLParam(r, "category")
 	removeFromDebrid := r.URL.Query().Get("removeFromDebrid") == "true"
 	if hash == "" {
 		http.Error(w, "No hash provided", http.StatusBadRequest)
