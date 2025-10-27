@@ -4,9 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -523,134 +521,6 @@ func (m *Manager) GetStats() map[string]interface{} {
 	}
 
 	return stats
-}
-
-// TrackFileAccess tracks file access patterns for smart caching
-func (m *Manager) TrackFileAccess(torrentName, fileName string, offset, fileSize int64, allFilesInTorrent []types.File) {
-	if !m.config.SmartCaching {
-		return
-	}
-
-	key := filepath.Join(torrentName, fileName)
-
-	// Get or create access info
-	info, _ := m.fileAccessTracker.LoadOrStore(key, &FileAccessInfo{
-		TorrentName:    torrentName,
-		FileName:       fileName,
-		FileSize:       fileSize,
-		LastAccessTime: time.Now(),
-		LastReadOffset: offset,
-	})
-
-	// Update access info
-	info.LastAccessTime = time.Now()
-	info.LastReadOffset = offset
-	info.AccessCount.Add(1)
-
-	// Check if user is near the end of the file (last 10%)
-	if fileSize > 0 && offset >= int64(float64(fileSize)*0.90) {
-		if !info.IsNearEnd.Load() {
-			info.IsNearEnd.Store(true)
-
-			// User is near end - detect and prefetch next episode
-			nextEpisode := m.detectNextEpisode(fileName, allFilesInTorrent)
-			if nextEpisode != nil {
-				info.NextEpisode = nextEpisode.Name
-				info.NextEpisodePath = filepath.Join(torrentName, nextEpisode.Name)
-
-				// Trigger prefetch of next episode
-				go m.prefetchNextEpisode(context.Background(), torrentName, *nextEpisode)
-			}
-		}
-	}
-}
-
-// detectNextEpisode detects the next episode in a torrent based on the current file
-func (m *Manager) detectNextEpisode(currentFileName string, allFiles []types.File) *types.File {
-	// Common episode patterns: S01E02, s01e02, 1x02, E02, Episode 02, etc.
-	episodePatterns := []string{
-		`[Ss](\d+)[Ee](\d+)`,      // S01E02 or s01e02
-		`(\d+)[xX](\d+)`,          // 1x02
-		`[Ee](\d+)`,               // E02
-		`[Ee]pisode[\s._-]?(\d+)`, // Episode 02
-		`[\s._-](\d+)[\s._-]`,     // Generic number (risky, last resort)
-	}
-
-	var currentEpisodeNum int
-	var currentSeasonNum int
-	matchedPattern := ""
-
-	// Try to extract episode number from current file
-	for _, pattern := range episodePatterns {
-		re := regexp.MustCompile(pattern)
-		matches := re.FindStringSubmatch(currentFileName)
-		if len(matches) > 0 {
-			matchedPattern = pattern
-			if len(matches) == 3 {
-				// Has season and episode
-				currentSeasonNum, _ = strconv.Atoi(matches[1])
-				currentEpisodeNum, _ = strconv.Atoi(matches[2])
-			} else if len(matches) == 2 {
-				// Episode only
-				currentEpisodeNum, _ = strconv.Atoi(matches[1])
-			}
-			break
-		}
-	}
-
-	if currentEpisodeNum == 0 {
-		return nil // Could not detect episode number
-	}
-
-	// Look for next episode
-	nextEpisodeNum := currentEpisodeNum + 1
-
-	// Search for next episode in files
-	for _, file := range allFiles {
-		// Skip non-video files
-		if !isVideoFile(file.Name) {
-			continue
-		}
-
-		// Try to match next episode
-		re := regexp.MustCompile(matchedPattern)
-		matches := re.FindStringSubmatch(file.Name)
-		if len(matches) > 0 {
-			var fileEpisodeNum int
-			var fileSeasonNum int
-
-			if len(matches) == 3 {
-				fileSeasonNum, _ = strconv.Atoi(matches[1])
-				fileEpisodeNum, _ = strconv.Atoi(matches[2])
-
-				// Check if it's the next episode in the same season
-				if fileSeasonNum == currentSeasonNum && fileEpisodeNum == nextEpisodeNum {
-					return &file
-				}
-			} else if len(matches) == 2 {
-				fileEpisodeNum, _ = strconv.Atoi(matches[1])
-
-				// Check if it's the next episode
-				if fileEpisodeNum == nextEpisodeNum {
-					return &file
-				}
-			}
-		}
-	}
-
-	return nil
-}
-
-// isVideoFile checks if a file is a video file based on extension
-func isVideoFile(fileName string) bool {
-	videoExts := []string{".mkv", ".mp4", ".avi", ".mov", ".wmv", ".flv", ".webm", ".m4v"}
-	ext := strings.ToLower(filepath.Ext(fileName))
-	for _, videoExt := range videoExts {
-		if ext == videoExt {
-			return true
-		}
-	}
-	return false
 }
 
 // prefetchNextEpisode prefetches the beginning of the next episode
