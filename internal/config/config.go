@@ -145,6 +145,7 @@ type DFS struct {
 	ChunkSize          string `json:"chunk_size,omitempty"`           // 1MB, 4MB etc
 	ReadAheadSize      string `json:"read_ahead_size,omitempty"`      // Read ahead size. e.g default to 16MB
 	MaxConcurrentReads int    `json:"max_concurrent_reads,omitempty"` // Maximum concurrent read operations
+	BufferSize         string `json:"buffer_size,omitempty"`          // In-memory buffer size for fast access (e.g., 4MB)
 
 	DaemonTimeout string `json:"daemon_timeout,omitempty"` // Time after which the FUSE daemon will exit if idle
 
@@ -164,6 +165,9 @@ type DFS struct {
 
 	// Health and monitoring
 	StatsInterval string `json:"stats_interval,omitempty"` // How often to log stats
+
+	// Smart caching
+	SmartCaching bool `json:"smart_caching,omitempty"` // Enable smart prefetching for episodes
 }
 
 type Config struct {

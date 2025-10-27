@@ -218,21 +218,24 @@
             // DFS specific stats
             if (data.stats) {
                 const stats = data.stats;
+                const cacheDirUsage = stats.cache_dir_limit > 0 ?
+                    ((stats.cache_dir_size / stats.cache_dir_limit) * 100).toFixed(1) : 0;
+
                 html += `
                     <div class="stat">
-                        <div class="stat-title">Cache Hits</div>
-                        <div class="stat-value text-success">${formatNumber(stats.cache_hits || 0)}</div>
-                        <div class="stat-desc">Hit Rate: ${((stats.cache_hit_rate || 0) * 100).toFixed(1)}%</div>
+                        <div class="stat-title">Cache Directory Size</div>
+                        <div class="stat-value text-primary">${window.decypharrUtils.formatBytes(stats.cache_dir_size || 0)}</div>
+                        <div class="stat-desc">Limit: ${window.decypharrUtils.formatBytes(stats.cache_dir_limit || 0)} (${cacheDirUsage}%)</div>
                     </div>
                     <div class="stat">
-                        <div class="stat-title">Network Requests</div>
-                        <div class="stat-value text-info">${formatNumber(stats.network_requests || 0)}</div>
-                        <div class="stat-desc">Bytes: ${window.decypharrUtils.formatBytes(stats.network_bytes || 0)}</div>
+                        <div class="stat-title">Active Reads</div>
+                        <div class="stat-value text-warning">${formatNumber(stats.active_reads || 0)}</div>
+                        <div class="stat-desc">Concurrent operations</div>
                     </div>
                     <div class="stat">
-                        <div class="stat-title">Read Operations</div>
-                        <div class="stat-value text-primary">${formatNumber(stats.read_ops || 0)}</div>
-                        <div class="stat-desc">Latency: ${(stats.read_latency_ms || 0).toFixed(2)}ms</div>
+                        <div class="stat-title">Opened Files</div>
+                        <div class="stat-value text-secondary">${formatNumber(stats.opened_files || 0)}</div>
+                        <div class="stat-desc">Currently cached</div>
                     </div>
                 `;
             }

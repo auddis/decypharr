@@ -33,6 +33,7 @@ type FuseConfig struct {
 	ChunkSize          int64
 	MaxConcurrentReads int
 	ReadAheadSize      int64
+	BufferSize         int64 // In-memory buffer size
 	DaemonTimeout      time.Duration
 
 	// File system settings
@@ -51,6 +52,9 @@ type FuseConfig struct {
 
 	// Health and monitoring
 	StatsInterval time.Duration
+
+	// Smart caching
+	SmartCaching bool
 }
 
 // DefaultFuseConfig returns a streaming-optimized default configuration
@@ -65,6 +69,7 @@ func DefaultFuseConfig() *FuseConfig {
 		CacheCleanupInterval: 5 * time.Minute,        // More frequent cleanup
 		AsyncRead:            true,
 		ReadAheadSize:        DefaultReadAheadSize,
+		BufferSize:           4 * 1024 * 1024,  // 4MB in-memory buffer for fast access
 		FileIdleTimeout:      10 * time.Minute, // Idle file handle timeout
 
 		// File system defaults
@@ -162,10 +167,21 @@ func ParseFuseConfig(debridConfig config.Debrid) (*FuseConfig, error) {
 		fuseConfig.ReadAheadSize = size
 	}
 
+	if cfg.BufferSize != "" {
+		size, err := parseSize(cfg.BufferSize)
+		if err != nil {
+			return nil, fmt.Errorf("invalid buffer size: %w", err)
+		}
+		fuseConfig.BufferSize = size
+	}
+
 	// Only override if user explicitly set it to non-zero
 	if cfg.MaxConcurrentReads > 0 {
 		fuseConfig.MaxConcurrentReads = cfg.MaxConcurrentReads
 	}
+
+	// Smart caching
+	fuseConfig.SmartCaching = cfg.SmartCaching
 
 	// Otherwise keep the default (4) from DefaultFuseConfig()
 	fuseConfig.UID = cfg.UID

@@ -201,22 +201,20 @@ func (m *Manager) Stop() error {
 			done <- m.cmd.Wait()
 		}()
 
-		select {
-		case <-time.After(2 * time.Second):
-			if err := m.cmd.Process.Kill(); err != nil {
-				// Check if the process already finished
-				if !strings.Contains(err.Error(), "process already finished") {
-					return err
-				}
+		<-time.After(2 * time.Second)
+		if err := m.cmd.Process.Kill(); err != nil {
+			// Check if the process already finished
+			if !strings.Contains(err.Error(), "process already finished") {
+				return err
 			}
+		}
 
-			// Still wait for the Wait() to complete to clean up the process
-			select {
-			case <-done:
-				m.logger.Info().Msg("Rclone process cleanup completed")
-			case <-time.After(5 * time.Second):
-				m.logger.Error().Msg("Process cleanup timeout")
-			}
+		// Still wait for the Wait() to complete to clean up the process
+		select {
+		case <-done:
+			m.logger.Info().Msg("Rclone process cleanup completed")
+		case <-time.After(5 * time.Second):
+			m.logger.Error().Msg("Process cleanup timeout")
 		}
 	}
 

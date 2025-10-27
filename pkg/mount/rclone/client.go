@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"runtime"
 	"strconv"
 	"time"
 
@@ -89,9 +90,12 @@ func (m *Mount) mountWithRetry(maxRetries int) error {
 func (m *Mount) performMount() error {
 	cfg := config.Get()
 
-	// Create mount directory
-	if err := os.MkdirAll(m.MountPath, 0755); err != nil {
-		return fmt.Errorf("failed to create mount directory %s: %w", m.MountPath, err)
+	// Create mount directory if not on windows
+
+	if runtime.GOOS != "windows" {
+		if err := os.MkdirAll(m.MountPath, 0755); err != nil {
+			return fmt.Errorf("failed to create mount directory %s: %w", m.MountPath, err)
+		}
 	}
 
 	// Check if already mounted

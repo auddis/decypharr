@@ -4,210 +4,237 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
-	"github.com/bits-and-blooms/bitset"
+	"github.com/sirrobot01/decypharr/pkg/mount/dfs/vfs/ranges"
 )
 
-// sanitizeForPath makes a string safe for use in file paths
-func sanitizeForPath(name string) string {
-	// Replace problematic characters with underscores
-	replacer := strings.NewReplacer(
-		"/", "_",
-		"\\", "_",
-		":", "_",
-		"*", "_",
-		"?", "_",
-		"\"", "_",
-		"<", "_",
-		">", "_",
-		"|", "_",
-	)
-	sanitized := replacer.Replace(name)
-
-	// Limit length to prevent filesystem issues
-	if len(sanitized) > 200 {
-		sanitized = sanitized[:200]
-	}
-
-	return sanitized
-}
-
-// SparseFile represents a cached file on disk with a bitmap tracking downloaded chunks
+// SparseFile represents a cached file on disk with range-based tracking
+// Uses range map for accurate, efficient sparse file handling (platform-independent)
+// Ranges are lazy-loaded from metadata to save memory
 type SparseFile struct {
-	path      string
-	size      int64
-	chunkSize int64
-
-	file       *os.File
-	bitmap     *bitset.BitSet
-	mu         sync.RWMutex
-	lastAccess time.Time
-	stats      *StatsTracker // Stats tracker for cache hits/misses
+	path         string
+	torrentName  string
+	fileName     string
+	size         int64
+	chunkSize    int64
+	file         *os.File
+	ranges       *ranges.Ranges // Lazy-loaded from metadata
+	rangesLoaded bool           // Whether ranges have been loaded
+	mu           sync.RWMutex
+	lastAccess   time.Time
+	modTime      time.Time
+	stats        *StatsTracker
+	cacheManager *Manager // Reference to save metadata
+	dirty        bool     // Has unflushed changes to metadata
 }
 
 // newSparseFile creates or opens a sparse cached file
-func newSparseFile(cacheDir, torrentName, fileName string, size, chunkSize int64, stats *StatsTracker) (*SparseFile, error) {
-	fileName = sanitizeForPath(fileName)
+func newSparseFile(cacheDir, torrentName, fileName string, size, chunkSize int64, stats *StatsTracker, manager *Manager) (*SparseFile, error) {
+	sanitizedFileName := sanitizeForPath(fileName)
 	torrentDir := filepath.Join(cacheDir, sanitizeForPath(torrentName))
-	bitmapPath := filepath.Join(torrentDir, fileName+".bitmap")
-	cachePath := filepath.Join(torrentDir, fileName)
+	cachePath := filepath.Join(torrentDir, sanitizedFileName)
 
-	// Ensure sparseFile directory exists
+	// Ensure directory exists
 	if err := os.MkdirAll(torrentDir, 0755); err != nil {
-		return nil, fmt.Errorf("create sparseFile dir: %w", err)
+		return nil, fmt.Errorf("create cache dir: %w", err)
 	}
 
 	// Open or create file
 	file, err := os.OpenFile(cachePath, os.O_RDWR|os.O_CREATE, 0644)
 	if err != nil {
-		return nil, fmt.Errorf("open sparseFile file: %w", err)
+		return nil, fmt.Errorf("open cache file: %w", err)
 	}
 
 	// Set file size (sparse allocation)
 	if err := file.Truncate(size); err != nil {
 		_ = file.Close()
-		return nil, fmt.Errorf("truncate sparseFile file: %w", err)
+		return nil, fmt.Errorf("truncate cache file: %w", err)
 	}
 
-	// Calculate number of chunks
-	numChunks := (size + chunkSize - 1) / chunkSize
-	bitmap := bitset.New(uint(numChunks))
-
-	// Try to load existing bitmap
-	if data, err := os.ReadFile(bitmapPath); err == nil && len(data) > 0 {
-		_ = bitmap.UnmarshalBinary(data)
+	sf := &SparseFile{
+		path:         cachePath,
+		torrentName:  torrentName,
+		fileName:     fileName,
+		size:         size,
+		chunkSize:    chunkSize,
+		file:         file,
+		ranges:       nil, // Lazy-loaded
+		rangesLoaded: false,
+		stats:        stats,
+		lastAccess:   time.Now(),
+		modTime:      time.Now(),
+		cacheManager: manager,
+		dirty:        false,
 	}
 
-	return &SparseFile{
-		path:      cachePath,
-		size:      size,
-		chunkSize: chunkSize,
-		file:      file,
-		bitmap:    bitmap,
-		stats:     stats,
-	}, nil
+	return sf, nil
 }
 
-// ReadAt reads from sparseFile if available, returns false if chunk missing
+// loadRanges lazy-loads ranges by scanning the actual file
+// Ranges are always rebuilt from actual data (fast enough with sampling)
+func (sf *SparseFile) loadRanges() error {
+	if sf.rangesLoaded {
+		return nil // Already loaded
+	}
+
+	// Scan existing file to rebuild ranges
+	sf.ranges = ranges.New()
+	if err := sf.scanExistingData(); err != nil {
+		return err
+	}
+
+	sf.rangesLoaded = true
+	return nil
+}
+
+// scanExistingData scans the file to detect which chunks already have data
+// This is a fallback when metadata doesn't exist
+func (sf *SparseFile) scanExistingData() error {
+	// Read file in chunks and check if they contain non-zero data
+	// This is a heuristic - we check a few bytes per chunk for performance
+
+	numChunks := (sf.size + sf.chunkSize - 1) / sf.chunkSize
+	sample := make([]byte, 4096) // Sample first 4KB of each chunk
+
+	for chunkIdx := int64(0); chunkIdx < numChunks; chunkIdx++ {
+		offset := chunkIdx * sf.chunkSize
+		readSize := int64(len(sample))
+		if offset+readSize > sf.size {
+			readSize = sf.size - offset
+		}
+
+		n, err := sf.file.ReadAt(sample[:readSize], offset)
+		if err != nil && n == 0 {
+			continue // Chunk likely not downloaded
+		}
+
+		// Check if sample contains non-zero bytes
+		hasData := false
+		for i := 0; i < n; i++ {
+			if sample[i] != 0 {
+				hasData = true
+				break
+			}
+		}
+
+		if hasData {
+			// Mark entire chunk as present
+			chunkEnd := offset + sf.chunkSize
+			if chunkEnd > sf.size {
+				chunkEnd = sf.size
+			}
+			sf.ranges.Insert(ranges.Range{
+				Pos:  offset,
+				Size: chunkEnd - offset,
+			})
+		}
+	}
+
+	return nil
+}
+
+// saveMetadata persists the current state to disk
+func (sf *SparseFile) saveMetadata() error {
+	if sf.cacheManager == nil || sf.ranges == nil {
+		return nil
+	}
+
+	meta := &Metadata{
+		ModTime:     sf.modTime,
+		ATime:       sf.lastAccess,
+		Size:        sf.size,
+		Ranges:      sf.ranges.GetRanges(),
+		Fingerprint: "", // Could add ETag/hash here
+		Dirty:       sf.dirty,
+	}
+
+	if err := sf.cacheManager.saveMetadata(sf.torrentName, sf.fileName, meta); err != nil {
+		return fmt.Errorf("save metadata: %w", err)
+	}
+
+	return nil
+}
+
+// ReadAt reads from cache if data is available, returns false if not cached
 func (sf *SparseFile) ReadAt(p []byte, offset int64) (n int, cached bool, err error) {
-	sf.mu.Lock()
-	defer sf.mu.Unlock()
+	// Ensure ranges are loaded (may need to upgrade to write lock)
+	sf.mu.RLock()
+	if !sf.rangesLoaded {
+		sf.mu.RUnlock()
+		sf.mu.Lock()
+		if err := sf.loadRanges(); err != nil {
+			sf.mu.Unlock()
+			return 0, false, err
+		}
+		sf.mu.Unlock()
+		sf.mu.RLock()
+	}
+	defer sf.mu.RUnlock()
 
 	sf.lastAccess = time.Now()
 
-	// Check if this range is cached first (before opening file)
-	startChunk := offset / sf.chunkSize
-	endChunk := (offset + int64(len(p)) - 1) / sf.chunkSize
-
-	// Check all chunks are present
-	for chunk := startChunk; chunk <= endChunk; chunk++ {
-		if !sf.bitmap.Test(uint(chunk)) {
-			// Track cache miss
-			sf.stats.TrackCacheMiss()
-			return 0, false, nil // Not cached
-		}
+	// Check if requested range is fully cached
+	requestedRange := ranges.Range{Pos: offset, Size: int64(len(p))}
+	if !sf.ranges.Present(requestedRange) {
+		return 0, false, nil // Not cached
 	}
 
-	// Track cache hit
-	sf.stats.TrackCacheHit()
-
-	// Check if file exists before trying to open it
-	if _, err := os.Stat(sf.path); os.IsNotExist(err) {
-		// File was deleted externally - clear bitmap and return not cached
-		sf.bitmap.ClearAll()
-		return 0, false, nil
+	// Data is cached, read from disk
+	n, err = sf.file.ReadAt(p, offset)
+	if err != nil {
+		return n, false, err
 	}
 
-	// Open file only when needed
-	file := sf.file
-	if file == nil {
-		file, err = os.OpenFile(sf.path, os.O_RDWR, 0644)
-		if err != nil {
-			// If file doesn't exist, clear the bitmap
-			if os.IsNotExist(err) {
-				sf.bitmap.ClearAll()
-				return 0, false, nil
-			}
-			return 0, false, err
-		}
-		// Don't store the file descriptor - close it after read
-	}
-
-	// All chunks present, read from disk
-	n, err = file.ReadAt(p, offset)
-
-	// Close FD immediately if we just opened it (not reusing existing)
-	if sf.file == nil {
-		_ = file.Close()
-	}
-
-	return n, true, err
+	return n, true, nil
 }
 
-// WriteAt writes data and marks chunks as cached
+// WriteAt writes data and updates the range map
 func (sf *SparseFile) WriteAt(p []byte, offset int64) (int, error) {
 	sf.mu.Lock()
 	defer sf.mu.Unlock()
 
-	// Open file if not already open
-	file := sf.file
-	if file == nil {
-		var err error
-		file, err = os.OpenFile(sf.path, os.O_RDWR, 0644)
-		if err != nil {
+	// Ensure ranges are loaded
+	if !sf.rangesLoaded {
+		if err := sf.loadRanges(); err != nil {
 			return 0, err
 		}
-		// Don't store the file descriptor - close it after write
 	}
 
-	n, err := file.WriteAt(p, offset)
+	// Write to file
+	n, err := sf.file.WriteAt(p, offset)
 	if err != nil {
-		if sf.file == nil {
-			_ = file.Close()
-		}
 		return n, err
 	}
 
-	// Mark chunks as cached
-	startChunk := offset / sf.chunkSize
-	endChunk := (offset + int64(n) - 1) / sf.chunkSize
-	for chunk := startChunk; chunk <= endChunk; chunk++ {
-		sf.bitmap.Set(uint(chunk))
+	// Mark this range as cached
+	if n > 0 {
+		sf.ranges.Insert(ranges.Range{
+			Pos:  offset,
+			Size: int64(n),
+		})
+		sf.dirty = true
 	}
 
-	// Close FD immediately if we just opened it
-	if sf.file == nil {
-		_ = file.Close()
-	}
-
+	sf.lastAccess = time.Now()
 	return n, nil
 }
 
-// Sync flushes data and bitmap to disk
+// Sync flushes data to disk
 func (sf *SparseFile) Sync() error {
 	sf.mu.Lock()
 	defer sf.mu.Unlock()
 
-	// Sync file data if file is open
+	// Sync file data
 	if sf.file != nil {
-		if err := sf.file.Sync(); err != nil {
-			return err
-		}
+		return sf.file.Sync()
 	}
 
-	// Save bitmap
-	data, err := sf.bitmap.MarshalBinary()
-	if err != nil {
-		return err
-	}
-
-	bitmapPath := sf.path + ".bitmap"
-	return os.WriteFile(bitmapPath, data, 0644)
+	return nil
 }
 
+// closeFD closes the file descriptor
 func (sf *SparseFile) closeFD() error {
 	sf.mu.Lock()
 	defer sf.mu.Unlock()
@@ -220,47 +247,20 @@ func (sf *SparseFile) closeFD() error {
 	return nil
 }
 
-func (m *Manager) closeIdleFiles() {
-	threshold := time.Now().Add(-m.config.FileIdleTimeout)
-
-	m.mu.RLock()
-	keys := m.files.Keys()
-	m.mu.RUnlock()
-
-	for _, key := range keys {
-		m.mu.RLock()
-		sf, ok := m.files.Peek(key)
-		m.mu.RUnlock()
-
-		if ok {
-			sf.mu.RLock()
-			if sf.lastAccess.Before(threshold) && sf.file != nil {
-				sf.mu.RUnlock()
-				_ = sf.closeFD()
-			} else {
-				sf.mu.RUnlock()
-			}
-		}
-	}
-}
-
-// Close closes the sparse file and saves bitmap
+// Close closes the sparse file
 func (sf *SparseFile) Close() error {
 	sf.mu.Lock()
 	defer sf.mu.Unlock()
 
-	// Save bitmap
-	data, _ := sf.bitmap.MarshalBinary()
-	bitmapPath := sf.path + ".bitmap"
-	_ = os.WriteFile(bitmapPath, data, 0644)
-
-	// Close file
 	if sf.file != nil {
-		return sf.file.Close()
+		err := sf.file.Close()
+		sf.file = nil
+		return err
 	}
 	return nil
 }
 
+// removeFromDisk removes the sparse file from disk
 func (sf *SparseFile) removeFromDisk() error {
 	sf.mu.Lock()
 	defer sf.mu.Unlock()
@@ -275,5 +275,90 @@ func (sf *SparseFile) removeFromDisk() error {
 	if err := os.Remove(sf.path); err != nil && !os.IsNotExist(err) {
 		return err
 	}
+
 	return nil
+}
+
+// GetCachedSize returns the total bytes downloaded
+func (sf *SparseFile) GetCachedSize() int64 {
+	sf.mu.RLock()
+	if !sf.rangesLoaded {
+		sf.mu.RUnlock()
+		sf.mu.Lock()
+		_ = sf.loadRanges()
+		sf.mu.Unlock()
+		sf.mu.RLock()
+	}
+	defer sf.mu.RUnlock()
+
+	if sf.ranges == nil {
+		return 0
+	}
+	return sf.ranges.Size()
+}
+
+// GetCachedRanges returns all cached ranges (for debugging/stats)
+func (sf *SparseFile) GetCachedRanges() []ranges.Range {
+	sf.mu.RLock()
+	if !sf.rangesLoaded {
+		sf.mu.RUnlock()
+		sf.mu.Lock()
+		_ = sf.loadRanges()
+		sf.mu.Unlock()
+		sf.mu.RLock()
+	}
+	defer sf.mu.RUnlock()
+
+	if sf.ranges == nil {
+		return nil
+	}
+	return sf.ranges.GetRanges()
+}
+
+// FindMissing returns ranges that need to be downloaded
+func (sf *SparseFile) FindMissing(offset, length int64) []ranges.Range {
+	sf.mu.RLock()
+	if !sf.rangesLoaded {
+		sf.mu.RUnlock()
+		sf.mu.Lock()
+		_ = sf.loadRanges()
+		sf.mu.Unlock()
+		sf.mu.RLock()
+	}
+	defer sf.mu.RUnlock()
+
+	if sf.ranges == nil {
+		// If ranges failed to load, assume everything is missing
+		return []ranges.Range{{Pos: offset, Size: length}}
+	}
+
+	return sf.ranges.FindMissing(ranges.Range{
+		Pos:  offset,
+		Size: length,
+	})
+}
+
+// IsCached checks if a range is cached WITHOUT allocating buffers
+// This is much more efficient than ReadAt for cache checks
+func (sf *SparseFile) IsCached(offset, length int64) bool {
+	sf.mu.RLock()
+	if !sf.rangesLoaded {
+		sf.mu.RUnlock()
+		sf.mu.Lock()
+		if !sf.rangesLoaded { // Double-check after acquiring write lock
+			_ = sf.loadRanges()
+		}
+		sf.mu.Unlock()
+		sf.mu.RLock()
+	}
+	defer sf.mu.RUnlock()
+
+	if sf.ranges == nil {
+		return false
+	}
+
+	return sf.ranges.Present(ranges.Range{
+		Pos:  offset,
+		Size: length,
+	})
 }

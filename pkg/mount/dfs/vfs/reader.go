@@ -12,7 +12,16 @@ import (
 	"github.com/sirrobot01/decypharr/pkg/debrid/types"
 )
 
-// Reader downloads multiple chunks concurrently like rclone --transfers
+// Buffer pool to reuse chunk buffers and avoid excessive allocations
+var chunkBufferPool = sync.Pool{
+	New: func() interface{} {
+		// Create 8MB buffer (typical chunk size)
+		buf := make([]byte, 8*1024*1024)
+		return &buf
+	},
+}
+
+// Reader downloads multiple chunks concurrently
 type Reader struct {
 	size        int64
 	debrid      *store.Cache
@@ -34,6 +43,22 @@ type Reader struct {
 	// Stats
 	bytesDownloaded atomic.Int64
 	stats           *StatsTracker // Stats tracker for network/read operations
+
+	// Initial prefetch state
+	initialPrefetchDone atomic.Bool
+
+	// Smart caching support
+	manager *Manager // Reference to VFS manager for smart caching
+
+	// Access pattern detection (to avoid slowing down ffprobe)
+	lastReadOffset   atomic.Int64
+	sequentialReads  atomic.Int64 // Count of sequential reads
+	randomSeeks      atomic.Int64 // Count of random seeks
+	totalReads       atomic.Int64
+	isLikelyFFProbe  atomic.Bool // True if access pattern looks like ffprobe
+	memoryBuffer     []byte      // In-memory buffer for first chunk
+	memoryBufferSize int64
+	bufferMu         sync.RWMutex
 }
 
 type downloadJob struct {
@@ -45,21 +70,40 @@ type downloadJob struct {
 }
 
 // NewReader creates a reader with parallel chunk downloading
-func NewReader(debridCache *store.Cache, torrentName string, torrentFile types.File, sparseFile *SparseFile, chunkSize, readAhead int64, maxConcurrent int, stats *StatsTracker) *Reader {
-	return &Reader{
-		size:          torrentFile.Size,
-		torrentName:   torrentName,
-		fileName:      torrentFile.Name,
-		fileLink:      torrentFile.Link,
-		debrid:        debridCache,
-		sparseFile:    sparseFile,
-		chunkSize:     chunkSize,
-		readAhead:     readAhead,
-		maxConcurrent: maxConcurrent,
-		downloading:   xsync.NewMap[int64, *downloadJob](),
-		stats:         stats,
+func NewReader(debridCache *store.Cache, torrentName string, torrentFile types.File, sparseFile *SparseFile, chunkSize, readAhead int64, maxConcurrent int, stats *StatsTracker, manager *Manager) *Reader {
+	// Determine buffer size
+	var bufferSize int64
+	if manager != nil && manager.config.BufferSize > 0 {
+		bufferSize = manager.config.BufferSize
+	} else {
+		bufferSize = 4 * 1024 * 1024 // Default 4MB
+	}
+
+	// Allocate in-memory buffer for fast access
+	var memBuffer []byte
+	if bufferSize > 0 && bufferSize <= torrentFile.Size {
+		memBuffer = make([]byte, bufferSize)
+	}
+
+	reader := &Reader{
+		size:             torrentFile.Size,
+		torrentName:      torrentName,
+		fileName:         torrentFile.Name,
+		fileLink:         torrentFile.Link,
+		debrid:           debridCache,
+		sparseFile:       sparseFile,
+		chunkSize:        chunkSize,
+		readAhead:        readAhead,
+		maxConcurrent:    maxConcurrent,
+		downloading:      xsync.NewMap[int64, *downloadJob](),
+		stats:            stats,
+		manager:          manager,
+		memoryBuffer:     memBuffer,
+		memoryBufferSize: bufferSize,
 		//downloadSem:   make(chan struct{}, maxConcurrent),
 	}
+	reader.lastReadOffset.Store(-1) // Initialize to -1 to detect first read
+	return reader
 }
 
 func (pr *Reader) getDownloadLink() (types.DownloadLink, error) {
@@ -87,19 +131,43 @@ func (pr *Reader) ReadAt(ctx context.Context, p []byte, offset int64) (int, erro
 		p = p[:readSize]
 	}
 
-	// Try sparseFile first
+	// Track access pattern to detect ffprobe
+	pr.detectAccessPattern(offset, readSize)
+
+	// Try memory buffer first (super fast for beginning of file)
+	if pr.memoryBuffer != nil && offset < pr.memoryBufferSize {
+		n, ok := pr.readFromMemoryBuffer(p, offset)
+		if ok {
+			return n, nil
+		}
+	}
+
+	// Try sparseFile cache
 	n, cached, err := pr.sparseFile.ReadAt(p, offset)
 	if cached && err == nil {
-		// Cache hit - track read operation and trigger read-ahead
-		pr.stats.TrackReadOp(int64(n))
-		go pr.scheduleReadAhead(ctx, offset+readSize)
+		// Cache hit - trigger read-ahead
+		// Only trigger aggressive read-ahead for sequential playback, not ffprobe
+		if !pr.isLikelyFFProbe.Load() {
+			go pr.scheduleReadAhead(ctx, offset+readSize)
+		}
 		return n, nil
+	}
+
+	// Aggressive initial prefetch ONLY for sequential playback, not ffprobe
+	if !pr.initialPrefetchDone.Load() && !pr.isLikelyFFProbe.Load() && offset < pr.chunkSize*2 {
+		pr.initialPrefetchDone.Store(true)
+		// Aggressively prefetch first few chunks in background for fast playback
+		go pr.aggressiveInitialPrefetch(ctx)
 	}
 
 	// Cache miss - need to download
 	// Calculate which chunks we need
 	startChunk := offset / pr.chunkSize
 	endChunk := (offset + readSize - 1) / pr.chunkSize
+
+	// Track active read
+	pr.stats.TrackActiveRead(1)
+	defer pr.stats.TrackActiveRead(-1)
 
 	// Download required chunks (maybe multiple if read spans chunks)
 	for chunkIdx := startChunk; chunkIdx <= endChunk; chunkIdx++ {
@@ -114,13 +182,130 @@ func (pr *Reader) ReadAt(ctx context.Context, p []byte, offset int64) (int, erro
 		return n, err
 	}
 
-	// Track read operation
-	pr.stats.TrackReadOp(int64(n))
+	// Fill memory buffer if this is from the beginning
+	if pr.memoryBuffer != nil && offset < pr.memoryBufferSize && !pr.isLikelyFFProbe.Load() {
+		pr.fillMemoryBuffer(ctx, offset, n)
+	}
 
-	// Trigger read-ahead for next chunks
-	go pr.scheduleReadAhead(ctx, offset+readSize)
+	// Trigger read-ahead for next chunks (only for sequential playback)
+	if !pr.isLikelyFFProbe.Load() {
+		go pr.scheduleReadAhead(ctx, offset+readSize)
+	}
+
+	// Track file access for smart caching (episode detection)
+	if pr.manager != nil && pr.manager.config.SmartCaching && !pr.isLikelyFFProbe.Load() {
+		torrent := pr.debrid.GetTorrentByName(pr.torrentName)
+		if torrent != nil {
+			// Convert map to slice for tracking
+			allFiles := make([]types.File, 0, len(torrent.Files))
+			for _, file := range torrent.Files {
+				allFiles = append(allFiles, file)
+			}
+			go pr.manager.TrackFileAccess(pr.torrentName, pr.fileName, offset+readSize, pr.size, allFiles)
+		}
+	}
 
 	return n, nil
+}
+
+// detectAccessPattern detects if access pattern looks like ffprobe
+func (pr *Reader) detectAccessPattern(offset, size int64) {
+	pr.totalReads.Add(1)
+	lastOffset := pr.lastReadOffset.Load()
+
+	// Detect random seeks (characteristic of ffprobe)
+	if lastOffset >= 0 {
+		diff := offset - lastOffset
+		// If jumping around (not sequential), it's likely ffprobe
+		if diff < 0 || diff > pr.chunkSize*2 {
+			pr.randomSeeks.Add(1)
+		} else {
+			pr.sequentialReads.Add(1)
+		}
+
+		// FFProbe characteristics:
+		// 1. Multiple random seeks (jumping to beginning and end)
+		// 2. Small read sizes (typically < 64KB)
+		// 3. Reading from end of file early
+		totalReads := pr.totalReads.Load()
+		if totalReads >= 3 {
+			randomRatio := float64(pr.randomSeeks.Load()) / float64(totalReads)
+			isSmallReads := size < 65536               // 64KB
+			isReadingEnd := offset > pr.size-1024*1024 // Last 1MB
+
+			// If more than 50% random seeks OR small reads at the end, likely ffprobe
+			if randomRatio > 0.5 || (isSmallReads && isReadingEnd && totalReads < 10) {
+				pr.isLikelyFFProbe.Store(true)
+			}
+		}
+	}
+
+	pr.lastReadOffset.Store(offset + size)
+}
+
+// readFromMemoryBuffer reads from the in-memory buffer
+func (pr *Reader) readFromMemoryBuffer(p []byte, offset int64) (int, bool) {
+	pr.bufferMu.RLock()
+	defer pr.bufferMu.RUnlock()
+
+	// Check if buffer has this data (buffer is filled from offset 0)
+	if offset >= pr.memoryBufferSize {
+		return 0, false
+	}
+
+	// Check if buffer is populated (non-zero check)
+	if pr.memoryBuffer[0] == 0 && pr.memoryBuffer[pr.memoryBufferSize-1] == 0 {
+		return 0, false // Buffer not filled yet
+	}
+
+	// Read from buffer
+	end := offset + int64(len(p))
+	if end > pr.memoryBufferSize {
+		end = pr.memoryBufferSize
+	}
+
+	n := copy(p, pr.memoryBuffer[offset:end])
+	return n, true
+}
+
+// fillMemoryBuffer fills the memory buffer with downloaded data
+func (pr *Reader) fillMemoryBuffer(ctx context.Context, offset int64, length int) {
+	// Only fill from the beginning
+	if offset > 0 {
+		return
+	}
+
+	pr.bufferMu.Lock()
+	defer pr.bufferMu.Unlock()
+
+	// Fill buffer from sparse file
+	endOffset := pr.memoryBufferSize
+	if endOffset > pr.size {
+		endOffset = pr.size
+	}
+
+	// Read from sparse file into memory buffer
+	_, _, _ = pr.sparseFile.ReadAt(pr.memoryBuffer[:endOffset], 0)
+}
+
+// aggressiveInitialPrefetch prefetches the first chunks aggressively for fast playback start
+func (pr *Reader) aggressiveInitialPrefetch(ctx context.Context) {
+	// Prefetch first 3-4 chunks immediately for instant playback
+	numInitialChunks := int64(4)
+	if pr.readAhead > 0 {
+		numInitialChunks = (pr.readAhead + pr.chunkSize - 1) / pr.chunkSize
+	}
+
+	// Don't exceed file size
+	totalChunks := (pr.size + pr.chunkSize - 1) / pr.chunkSize
+	if numInitialChunks > totalChunks {
+		numInitialChunks = totalChunks
+	}
+
+	// Start downloading first chunks concurrently
+	for chunkIdx := int64(0); chunkIdx < numInitialChunks; chunkIdx++ {
+		go pr.downloadChunkAsync(ctx, chunkIdx)
+	}
 }
 
 // scheduleReadAhead schedules read-ahead chunks for download
@@ -142,10 +327,14 @@ func (pr *Reader) scheduleReadAhead(ctx context.Context, fromOffset int64) {
 
 // downloadChunkAsync downloads a chunk in background (non-blocking)
 func (pr *Reader) downloadChunkAsync(ctx context.Context, chunkIdx int64) {
-	// Check if already cached
+	// Check if already cached (no allocation!)
 	chunkStart := chunkIdx * pr.chunkSize
-	testBuf := make([]byte, 1)
-	if _, cached, _ := pr.sparseFile.ReadAt(testBuf, chunkStart); cached {
+	chunkEnd := chunkStart + pr.chunkSize
+	if chunkEnd > pr.size {
+		chunkEnd = pr.size
+	}
+
+	if pr.sparseFile.IsCached(chunkStart, chunkEnd-chunkStart) {
 		return // Already cached
 	}
 
@@ -167,9 +356,8 @@ func (pr *Reader) downloadChunk(ctx context.Context, chunkIdx int64) error {
 	}
 	chunkSize := chunkEnd - chunkStart
 
-	// Check sparseFile first
-	testBuf := make([]byte, 1)
-	if _, cached, _ := pr.sparseFile.ReadAt(testBuf, chunkStart); cached {
+	// Check sparseFile first (no allocation!)
+	if pr.sparseFile.IsCached(chunkStart, chunkSize) {
 		return nil // Already cached
 	}
 
@@ -226,8 +414,11 @@ func (pr *Reader) doDownload(ctx context.Context, offset, size int64) error {
 		_ = rc.Close()
 	}(rc)
 
-	// Read chunk
-	buffer := make([]byte, size)
+	// Get buffer from pool (reuse memory!)
+	bufPtr := chunkBufferPool.Get().(*[]byte)
+	defer chunkBufferPool.Put(bufPtr) // Return to pool when done
+
+	buffer := (*bufPtr)[:size] // Slice to exact size needed
 	totalRead := 0
 
 	for totalRead < int(size) {
@@ -252,8 +443,6 @@ func (pr *Reader) doDownload(ctx context.Context, offset, size int64) error {
 		if err != nil {
 			return fmt.Errorf("write to sparseFile: %w", err)
 		}
-		// Track network read
-		pr.stats.TrackNetworkRead(int64(totalRead))
 	}
 
 	return nil

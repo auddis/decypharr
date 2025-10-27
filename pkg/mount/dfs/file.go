@@ -84,19 +84,10 @@ func (f *File) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut)
 
 // Open creates file handle with VFS
 func (f *File) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
+
 	fh := &FileHandle{
 		file:   f,
 		logger: f.logger,
-	}
-
-	// For remote files, create VFS handle with scan-aware settings
-	if f.IsRemote() {
-		vfsHandle, err := f.vfs.CreateReader(f.torrentName, f.torrentFile)
-		if err != nil {
-			f.logger.Error().Err(err).Msg("Failed to create VFS handle")
-			return nil, 0, syscall.EIO
-		}
-		fh.vfsHandle = vfsHandle
 	}
 
 	fh.lastAccess.Store(time.Now().Unix())
@@ -121,18 +112,24 @@ func (fh *FileHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.Re
 		return fuse.ReadResultData(data), 0
 	}
 
-	// Use VFS handle with ffprobe-aware caching
-	if fh.vfsHandle == nil {
+	// Lazy-create VFS handle on first read (not on Open)
+	// This prevents unnecessary sparse file creation when file browsers
+	// just open files for metadata without actually reading content
+	if fh.vfsHandle == nil && fh.file.IsRemote() {
 		vfsHandle, err := fh.file.vfs.CreateReader(fh.file.torrentName, fh.file.torrentFile)
 		if err != nil {
-			fh.logger.Error().Err(err).Msg("Failed to create VFS handle")
 			return nil, syscall.EIO
 		}
 		fh.vfsHandle = vfsHandle
 	}
+
+	// Ensure we have a VFS handle
+	if fh.vfsHandle == nil {
+		return nil, syscall.EIO
+	}
+
 	n, err := fh.vfsHandle.ReadAt(ctx, dest, off)
 	if err != nil && err != io.EOF {
-		fh.logger.Error().Err(err).Int64("offset", off).Msg("VFS read failed")
 		return nil, syscall.EIO
 	}
 	return fuse.ReadResultData(dest[:n]), 0

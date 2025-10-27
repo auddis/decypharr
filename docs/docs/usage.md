@@ -48,11 +48,80 @@ To connect Decypharr to your Sonarr or Radarr instance:
 4. Click **Save** to add the download client
 
 
-### Rclone Configuration
+### Mount Configuration (DFS - Recommended)
+
+**DFS (Decypharr File System)** is the recommended mounting solution - it's built directly into Decypharr and provides better performance than Rclone for streaming from debrid services.
+
+#### Why Choose DFS?
+- **No external dependencies** - Works out of the box
+- **Faster playback start** - Aggressive prefetching for instant streaming
+- **Smart caching** - Automatically prefetches next episodes when binge-watching
+- **Lower resource usage** - More efficient than Rclone
+- **Optimized for streaming** - Built specifically for debrid services
+
+#### Setting up DFS
+
+1. **Enable DFS in your configuration:**
+
+```json
+{
+  "dfs": {
+    "enabled": true,
+    "mount_path": "/mnt/decypharr",
+    "cache_dir": "/config/dfs/cache",
+    "disk_cache_size": "10GB",
+    "chunk_size": "8MB",
+    "read_ahead_size": "16MB",
+    "buffer_size": "4MB",
+    "max_concurrent_reads": 4,
+    "smart_caching": true
+  }
+}
+```
+
+2. **Set your Debrid Mount Folder** to match DFS structure:
+   - For Real Debrid: `/mnt/decypharr/realdebrid/__all__`
+   - For Torbox: `/mnt/decypharr/torbox/__all__`
+   - DFS automatically creates subdirectories for each debrid service
+
+3. **Docker Setup** (if using Docker):
+
+```yaml
+services:
+  decypharr:
+    volumes:
+      - /mnt:/mnt:rshared  # Important: use 'rshared'
+    devices:
+      - /dev/fuse:/dev/fuse:rwm
+    cap_add:
+      - SYS_ADMIN
+```
+
+#### DFS Configuration Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `enabled` | `false` | Enable DFS mounting |
+| `mount_path` | `/mnt/decypharr` | Where to mount debrid services |
+| `cache_dir` | `/config/dfs/cache` | Cache storage location |
+| `disk_cache_size` | `5GB` | Maximum cache size |
+| `chunk_size` | `8MB` | Download chunk size |
+| `read_ahead_size` | `16MB` | Prefetch amount |
+| `buffer_size` | `4MB` | In-memory buffer for fast access |
+| `max_concurrent_reads` | `4` | Parallel downloads |
+| `smart_caching` | `false` | Auto-prefetch next episodes |
+
+**For more details**, see the [DFS Mounting Guide](guides/dfs-mounting.md).
+
+---
+
+### Alternative: Rclone Configuration
 
 ![Rclone Settings](images/settings/rclone.png)
 
-If you want Decypharr to automatically mount WebDAV folders using Rclone, you need to set up Rclone first:
+> **Note:** DFS (above) is recommended for most users. Use Rclone only if you need advanced Rclone features.
+
+If you want Decypharr to automatically mount WebDAV folders using Rclone:
 
 If you're using Docker, the rclone binary is already included in the container. If you're running Decypharr directly, make sure Rclone is installed on your system.
 

@@ -74,8 +74,7 @@ func (m *Manager) GetStats() (map[string]interface{}, error) {
 	// Collect stats from all registered mounts
 	if len(m.mounts) > 0 {
 		mountsInfo := make(map[string]interface{})
-		var totalCacheHits, totalCacheMisses, totalNetworkReqs, totalNetworkBytes int64
-		var totalReadOps, totalReadBytes, totalCachedFiles, totalCacheDiskUsed int64
+		var totalCacheDirSize, totalCacheDirLimit, totalActiveReads, totalOpenedFiles int64
 
 		for name, mount := range m.mounts {
 			if mount != nil && mount.vfs != nil {
@@ -89,29 +88,17 @@ func (m *Manager) GetStats() (map[string]interface{}, error) {
 				mountsInfo[name] = mountInfo
 
 				// Aggregate stats
-				if cacheHits, ok := vfsStats["cache_hits"].(int64); ok {
-					totalCacheHits += cacheHits
+				if cacheDirSize, ok := vfsStats["cache_dir_size"].(int64); ok {
+					totalCacheDirSize += cacheDirSize
 				}
-				if cacheMisses, ok := vfsStats["cache_misses"].(int64); ok {
-					totalCacheMisses += cacheMisses
+				if cacheDirLimit, ok := vfsStats["cache_dir_limit"].(int64); ok {
+					totalCacheDirLimit += cacheDirLimit
 				}
-				if netReqs, ok := vfsStats["network_requests"].(int64); ok {
-					totalNetworkReqs += netReqs
+				if activeReads, ok := vfsStats["active_reads"].(int64); ok {
+					totalActiveReads += activeReads
 				}
-				if netBytes, ok := vfsStats["network_bytes"].(int64); ok {
-					totalNetworkBytes += netBytes
-				}
-				if readOps, ok := vfsStats["read_ops"].(int64); ok {
-					totalReadOps += readOps
-				}
-				if readBytes, ok := vfsStats["read_bytes"].(int64); ok {
-					totalReadBytes += readBytes
-				}
-				if cachedFiles, ok := vfsStats["cached_files"].(int); ok {
-					totalCachedFiles += int64(cachedFiles)
-				}
-				if diskUsed, ok := vfsStats["cache_disk_used"].(int64); ok {
-					totalCacheDiskUsed += diskUsed
+				if openedFiles, ok := vfsStats["opened_files"].(int64); ok {
+					totalOpenedFiles += openedFiles
 				}
 			}
 		}
@@ -119,21 +106,11 @@ func (m *Manager) GetStats() (map[string]interface{}, error) {
 		stats["mounts"] = mountsInfo
 
 		// Add aggregated stats
-		totalAccess := totalCacheHits + totalCacheMisses
-		hitRate := 0.0
-		if totalAccess > 0 {
-			hitRate = float64(totalCacheHits) / float64(totalAccess)
-		}
 		stats["stats"] = map[string]interface{}{
-			"cache_hits":       totalCacheHits,
-			"cache_misses":     totalCacheMisses,
-			"cache_hit_rate":   hitRate,
-			"network_requests": totalNetworkReqs,
-			"network_bytes":    totalNetworkBytes,
-			"read_ops":         totalReadOps,
-			"read_bytes":       totalReadBytes,
-			"cached_files":     totalCachedFiles,
-			"cache_disk_used":  totalCacheDiskUsed,
+			"cache_dir_size":  totalCacheDirSize,
+			"cache_dir_limit": totalCacheDirLimit,
+			"active_reads":    totalActiveReads,
+			"opened_files":    totalOpenedFiles,
 		}
 	}
 

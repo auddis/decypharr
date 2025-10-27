@@ -1,10 +1,10 @@
-# Internal Mounting
+# Rclone Mounting
 
-This guide explains how to use Decypharr's internal mounting feature to eliminate the need for external rclone setup.
+This guide explains how to use Decypharr's rclone mounting feature to eliminate the need for external rclone setup.
 
 ## Overview
 
-![Decypharr Internal Mounting](../images/settings/rclone.png)
+![Rclone Mounting](../images/settings/rclone.png)
 
 Instead of requiring users to install and configure rclone separately, Decypharr can now mount your WebDAV endpoints internally using rclone as a library dependency. This provides a seamless experience where files appear as regular filesystem paths without any external dependencies.
 

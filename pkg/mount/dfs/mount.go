@@ -67,11 +67,12 @@ func (m *Mount) Start(ctx context.Context) error {
 		Str("mount_path", m.config.MountPath).
 		Msg("Starting DFS")
 
-	// Create mount point if it doesn't exist
-	if err := os.MkdirAll(m.config.MountPath, 0755); err != nil {
-		return fmt.Errorf("failed to create mount point: %w", err)
+	// Create mount point if it doesn't exist(skip if on Windows)
+	if runtime.GOOS != "windows" {
+		if err := os.MkdirAll(m.config.MountPath, 0755); err != nil {
+			return fmt.Errorf("failed to create mount point: %w", err)
+		}
 	}
-
 	// Try to unmount if already mounted
 	m.forceUnmount()
 

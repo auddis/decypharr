@@ -1,4 +1,5 @@
 # Guides for setting up Decypharr
 
 - [Manual Downloading with Decypharr](downloading.md)
-- [Internal Mounting](internal-mounting.md)
+- [Decypharr File System Mounting](dfs-mounting.md)
+- [Rclone Mounting](internal-mounting.md)

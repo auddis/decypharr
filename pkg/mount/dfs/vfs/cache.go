@@ -4,7 +4,9 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -12,6 +14,7 @@ import (
 	"time"
 
 	lru "github.com/hashicorp/golang-lru/v2"
+	"github.com/puzpuzpuz/xsync/v4"
 	"github.com/sirrobot01/decypharr/pkg/debrid/store"
 	"github.com/sirrobot01/decypharr/pkg/debrid/types"
 	"github.com/sirrobot01/decypharr/pkg/mount/dfs/config"
@@ -19,41 +22,20 @@ import (
 
 // StatsTracker is a lightweight struct for tracking VFS statistics
 type StatsTracker struct {
-	cacheHits      *atomic.Int64
-	cacheMisses    *atomic.Int64
-	networkReads   *atomic.Int64
-	networkBytes   *atomic.Int64
-	totalReadOps   *atomic.Int64
-	totalReadBytes *atomic.Int64
+	activeReads atomic.Int64
+	openedFiles atomic.Int64
 }
 
-// TrackCacheHit increments cache hit counter
-func (st *StatsTracker) TrackCacheHit() {
-	if st != nil && st.cacheHits != nil {
-		st.cacheHits.Add(1)
+// TrackActiveRead increments/decrements active read counter
+func (st *StatsTracker) TrackActiveRead(delta int64) {
+	if st != nil {
+		st.activeReads.Add(delta)
 	}
 }
 
-// TrackCacheMiss increments cache miss counter
-func (st *StatsTracker) TrackCacheMiss() {
-	if st != nil && st.cacheMisses != nil {
-		st.cacheMisses.Add(1)
-	}
-}
-
-// TrackNetworkRead increments network read counters
-func (st *StatsTracker) TrackNetworkRead(bytes int64) {
-	if st != nil && st.networkReads != nil && st.networkBytes != nil {
-		st.networkReads.Add(1)
-		st.networkBytes.Add(bytes)
-	}
-}
-
-// TrackReadOp increments read operation counters
-func (st *StatsTracker) TrackReadOp(bytes int64) {
-	if st != nil && st.totalReadOps != nil && st.totalReadBytes != nil {
-		st.totalReadOps.Add(1)
-		st.totalReadBytes.Add(bytes)
+func (st *StatsTracker) TrackOpenFiles(delta int64) {
+	if st != nil {
+		st.openedFiles.Add(delta)
 	}
 }
 
@@ -87,6 +69,19 @@ type CacheRequest struct {
 	CacheType   CacheType
 }
 
+// FileAccessInfo tracks file access patterns for smart caching
+type FileAccessInfo struct {
+	TorrentName     string
+	FileName        string
+	LastAccessTime  time.Time
+	LastReadOffset  int64
+	FileSize        int64
+	AccessCount     atomic.Int64
+	IsNearEnd       atomic.Bool
+	NextEpisode     string // Next episode filename if detected
+	NextEpisodePath string // Full path to next episode
+}
+
 // Manager manages sparse files for all remote files
 type Manager struct {
 	debrid      *store.Cache
@@ -95,23 +90,21 @@ type Manager struct {
 	mu          sync.RWMutex
 	closeCtx    context.Context
 	closeCancel context.CancelFunc
-	wg          sync.WaitGroup
-
-	// Stats tracking
-	cacheHits      atomic.Int64
-	cacheMisses    atomic.Int64
-	networkReads   atomic.Int64
-	networkBytes   atomic.Int64
-	totalReadOps   atomic.Int64
-	totalReadBytes atomic.Int64
 
 	// Stats tracker for passing to readers/files
 	stats *StatsTracker
+
+	// Smart caching: track file access for episode detection
+	fileAccessTracker *xsync.Map[string, *FileAccessInfo]
+
+	// Cached directory size (updated during cleanup)
+	cachedDirSize atomic.Int64
+	lastSizeCheck atomic.Int64 // Unix timestamp
 }
 
 // NewManager creates a sparseFile manager
 func NewManager(debridCache *store.Cache, fuseConfig *config.FuseConfig) *Manager {
-	// Each SparseFile holds: open FD + bitmap + state
+	// Each SparseFile holds: open FD + lazy-loaded ranges + state
 	files, _ := lru.NewWithEvict(50, func(key string, sf *SparseFile) {
 		_ = sf.Close()
 	})
@@ -125,24 +118,17 @@ func NewManager(debridCache *store.Cache, fuseConfig *config.FuseConfig) *Manage
 	}
 
 	// Create stats tracker that references the Manager's atomic counters
-	m.stats = &StatsTracker{
-		cacheHits:      &m.cacheHits,
-		cacheMisses:    &m.cacheMisses,
-		networkReads:   &m.networkReads,
-		networkBytes:   &m.networkBytes,
-		totalReadOps:   &m.totalReadOps,
-		totalReadBytes: &m.totalReadBytes,
-	}
-
-	m.wg.Add(1)
+	m.stats = &StatsTracker{}
 	go m.closeIdleFilesLoop()
+	go m.Cleanup(ctx)
+
+	// Initialize file access tracker for smart caching
+	m.fileAccessTracker = xsync.NewMap[string, *FileAccessInfo]()
 
 	return m
 }
 
 func (m *Manager) closeIdleFilesLoop() {
-	defer m.wg.Done()
-
 	ticker := time.NewTicker(2 * time.Minute)
 	defer ticker.Stop()
 
@@ -152,6 +138,30 @@ func (m *Manager) closeIdleFilesLoop() {
 			m.closeIdleFiles()
 		case <-m.closeCtx.Done():
 			return
+		}
+	}
+}
+
+func (m *Manager) closeIdleFiles() {
+	threshold := time.Now().Add(-m.config.FileIdleTimeout)
+
+	m.mu.RLock()
+	keys := m.files.Keys()
+	m.mu.RUnlock()
+
+	for _, key := range keys {
+		m.mu.RLock()
+		sf, ok := m.files.Peek(key)
+		m.mu.RUnlock()
+
+		if ok {
+			sf.mu.RLock()
+			shouldClose := sf.lastAccess.Before(threshold) && sf.file != nil
+			sf.mu.RUnlock()
+
+			if shouldClose {
+				_ = sf.closeFD()
+			}
 		}
 	}
 }
@@ -186,12 +196,13 @@ func (m *Manager) GetOrCreateFile(torrentName, filename string, size int64) (*Sp
 		m.files.Remove(key)
 	}
 
-	sf, err := newSparseFile(m.config.CacheDir, torrentName, filename, size, m.config.ChunkSize, m.stats)
+	sf, err := newSparseFile(m.config.CacheDir, torrentName, filename, size, m.config.ChunkSize, m.stats, m)
 	if err != nil {
 		return nil, err
 	}
 
 	m.files.Add(key, sf)
+	m.stats.TrackOpenFiles(1) // Track open file
 	return sf, nil
 }
 
@@ -222,20 +233,22 @@ func (m *Manager) CreateReader(torrentName string, torrentFile types.File) (*Han
 		maxConcurrent = 1
 	}
 
-	reader := NewReader(m.debrid, torrentName, torrentFile, sf, chunkSize, readAhead, maxConcurrent, m.stats)
+	reader := NewReader(m.debrid, torrentName, torrentFile, sf, chunkSize, readAhead, maxConcurrent, m.stats, m)
 	return NewHandle(reader), nil
 }
 
 // Close closes all sparse files
 func (m *Manager) Close() error {
 	m.closeCancel()
-	m.wg.Wait()
 
 	m.files.Purge() // Calls evict callback for all entries
 	return nil
 }
 
 func (m *Manager) CloseFile(filePath string) error {
+	if _, exists := m.files.Peek(filePath); exists {
+		m.stats.TrackOpenFiles(-1) // Decrement open file count
+	}
 	m.files.Remove(filePath) // Calls evict callback
 	return nil
 }
@@ -245,71 +258,127 @@ func (m *Manager) RemoveFile(filePath string) error {
 		if err := sf.removeFromDisk(); err != nil {
 			return err
 		}
+		m.stats.TrackOpenFiles(-1) // Decrement open file count
 		m.files.Remove(filePath)
 	}
 	return nil
 }
 
-func (m *Manager) Cleanup(ctx context.Context) error {
+func (m *Manager) Cleanup(ctx context.Context) {
 	// Clean up cache directory, runs every x duration
-	ticker := time.NewTicker(m.config.CacheCleanupInterval)
-	defer ticker.Stop()
+	cleanupTicker := time.NewTicker(m.config.CacheCleanupInterval)
+	defer cleanupTicker.Stop()
 
 	for {
 		select {
-		case <-ticker.C:
+		case <-cleanupTicker.C:
 			m.cleanup()
 		case <-ctx.Done():
-			return nil
+			return
+		}
+	}
+}
+
+// syncAllMetadata saves metadata for all dirty files
+// BUT: Only syncs files that haven't been accessed recently (not actively playing)
+func (m *Manager) syncAllMetadata() {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	now := time.Now()
+
+	// Iterate through all cached files
+	for _, key := range m.files.Keys() {
+		if sf, ok := m.files.Peek(key); ok {
+			// Only sync if dirty AND not recently accessed
+			// If file was accessed in last 10 seconds, skip (likely active playback)
+			sf.mu.RLock()
+			isDirty := sf.dirty
+			recentlyAccessed := now.Sub(sf.lastAccess) < 10*time.Second
+			hasRanges := sf.ranges != nil
+			sf.mu.RUnlock()
+
+			if !isDirty || !hasRanges || recentlyAccessed {
+				continue // Skip files that are clean, empty, or actively playing
+			}
+
+			// Sync in background to avoid blocking
+			go func(sparseFile *SparseFile) {
+				sparseFile.mu.Lock()
+				defer sparseFile.mu.Unlock()
+				if sparseFile.dirty && sparseFile.ranges != nil {
+					_ = sparseFile.saveMetadata()
+					sparseFile.dirty = false
+				}
+			}(sf)
 		}
 	}
 }
 
 func (m *Manager) cleanup() {
-	// Check the actual disk usage of the cache directory
-	totalSize, fileList, err := m.scanCacheDirectory()
-	if err != nil {
-		return
+	// Scan metadata directory first (much faster)
+	// Falls back to actual cache scan if needed
+	totalSize, fileList, err := m.scanMetadataDirectory()
+	if err != nil || len(fileList) == 0 {
+		// Fallback to actual cache scan
+		totalSize, fileList, err = m.scanCacheDirectory()
+		if err != nil {
+			// Log error but don't crash
+			return
+		}
 	}
 
-	// Check if we exceed the max size
+	// Update cached size for stats
+	m.cachedDirSize.Store(totalSize)
+	m.lastSizeCheck.Store(time.Now().Unix())
+
 	maxSize := m.config.CacheDiskSize
 	if totalSize <= maxSize {
 		return // Under limit, nothing to do
 	}
 
-	// Need to free space - target 90% to avoid thrashing
+	// Calculate how much to free - target 90% to avoid thrashing
 	targetSize := maxSize * 9 / 10
 	toFree := totalSize - targetSize
 
-	// Sort files by modification time (oldest first)
+	// Sort by access time (least recently accessed first)
+	// This gives us true LRU eviction
 	sort.Slice(fileList, func(i, j int) bool {
-		return fileList[i].modTime.Before(fileList[j].modTime)
+		return fileList[i].accessTime.Before(fileList[j].accessTime)
 	})
 
-	// Remove oldest files until we're under target
+	// Remove least recently accessed files until under target
 	var freed int64
-	for _, file := range fileList {
+	var filesRemoved int
+	for _, fileInfo := range fileList {
 		if freed >= toFree {
 			break
 		}
 
-		// Remove the sparse file and its bitmap
-		if err := m.removeFileFromDisk(file.path); err != nil {
+		// Remove the file (with proper locking and cleanup)
+		if err := m.removeFile(fileInfo.cacheKey, fileInfo.path); err != nil {
+			// Log but continue with other files
 			continue
 		}
 
-		freed += file.size
+		freed += fileInfo.size
+		filesRemoved++
+	}
+
+	// Update cached size after cleanup
+	if filesRemoved > 0 {
+		newSize := totalSize - freed
+		m.cachedDirSize.Store(newSize)
 	}
 }
 
 type cachedFileInfo struct {
-	path    string    // Full path to sparse file
-	size    int64     // Combined size (file + bitmap)
-	modTime time.Time // Last modification time
+	path       string    // Full path to sparse file
+	cacheKey   string    // Key in LRU cache (for removal)
+	size       int64     // Actual disk usage (sparse-aware)
+	accessTime time.Time // Last access time (for LRU eviction)
 }
 
-// scanCacheDirectory walks the cache directory and returns total size and file list
 // scanCacheDirectory walks the cache directory and returns total size and file list
 func (m *Manager) scanCacheDirectory() (int64, []cachedFileInfo, error) {
 	var totalSize int64
@@ -325,41 +394,51 @@ func (m *Manager) scanCacheDirectory() (int64, []cachedFileInfo, error) {
 			return nil
 		}
 
-		// Skip bitmap files for now, we'll account for them with their parent
-		if strings.HasSuffix(path, ".bitmap") {
-			totalSize += info.Size() // Bitmaps are small, regular size is fine
+		// Skip metadata directory
+		if strings.Contains(path, ".meta") {
 			return nil
 		}
 
-		// This is a sparse file - get actual disk usage
-		if !seenFiles[path] {
-			// Get actual blocks allocated (platform-specific)
-			fileSize, err := m.getActualDiskUsage(path, info)
-			if err != nil {
-				// Fallback to logical size if we can't get actual usage
-				fileSize = info.Size()
-			}
-
-			// Add bitmap size if it exists
-			bitmapPath := path + ".bitmap"
-			if bitmapInfo, err := os.Stat(bitmapPath); err == nil {
-				fileSize += bitmapInfo.Size()
-			}
-
-			totalSize += fileSize
-			fileList = append(fileList, cachedFileInfo{
-				path:    path,
-				size:    fileSize,
-				modTime: info.ModTime(),
-			})
-			seenFiles[path] = true
+		// Skip if already processed
+		if seenFiles[path] {
+			return nil
 		}
+		seenFiles[path] = true
+
+		// Get actual disk usage (accounts for sparse files)
+		fileSize, err := m.getActualDiskUsage(path, info)
+		if err != nil {
+			// Fallback to logical size
+			fileSize = info.Size()
+		}
+
+		// Calculate cache key from path
+		cacheKey, err := filepath.Rel(m.config.CacheDir, path)
+		if err != nil {
+			cacheKey = "" // Will skip removal if can't calculate key
+		}
+
+		// Get access time - prefer from in-memory tracking
+		accessTime := m.getFileAccessTime(cacheKey, info)
+
+		totalSize += fileSize
+		fileList = append(fileList, cachedFileInfo{
+			path:       path,
+			cacheKey:   cacheKey,
+			size:       fileSize,
+			accessTime: accessTime,
+		})
 
 		return nil
 	})
 
 	return totalSize, fileList, err
 }
+
+// getFileAccessTime is implemented in platform-specific files:
+// - cache_unix.go (Linux, FreeBSD, OpenBSD, NetBSD)
+// - cache_darwin.go (macOS)
+// - cache_windows.go (Windows)
 
 // getActualDiskUsage returns the actual disk space used by a file (accounting for sparse files)
 func (m *Manager) getActualDiskUsage(path string, info os.FileInfo) (int64, error) {
@@ -381,23 +460,28 @@ func (m *Manager) getActualDiskUsage(path string, info os.FileInfo) (int64, erro
 	}
 }
 
-// removeFileFromDisk removes a sparse file and its bitmap from disk
-func (m *Manager) removeFileFromDisk(sparseFilePath string) error {
-	// Also remove from in-memory cache if present
-	// Construct the cache key from the path
-	relPath, err := filepath.Rel(m.config.CacheDir, sparseFilePath)
-	if err == nil {
-		m.files.Remove(relPath)
+// removeFile removes a file from both in-memory cache and disk (thread-safe)
+func (m *Manager) removeFile(cacheKey, diskPath string) error {
+	// First, remove from in-memory LRU cache (with locking)
+	if cacheKey != "" {
+		m.mu.Lock()
+		if sf, exists := m.files.Peek(cacheKey); exists {
+			// Close the file cleanly before removing
+			_ = sf.Close()
+			m.files.Remove(cacheKey)
+			m.stats.TrackOpenFiles(-1)
+		}
+		m.mu.Unlock()
 	}
 
+	// Then remove from disk
+	return m.removeFileFromDisk(diskPath)
+}
+
+// removeFileFromDisk removes a sparse file from disk
+func (m *Manager) removeFileFromDisk(sparseFilePath string) error {
 	// Remove sparse file
 	if err := os.Remove(sparseFilePath); err != nil && !os.IsNotExist(err) {
-		return err
-	}
-
-	// Remove bitmap
-	bitmapPath := sparseFilePath + ".bitmap"
-	if err := os.Remove(bitmapPath); err != nil && !os.IsNotExist(err) {
 		return err
 	}
 
@@ -406,58 +490,215 @@ func (m *Manager) removeFileFromDisk(sparseFilePath string) error {
 
 // GetStats returns VFS cache statistics
 func (m *Manager) GetStats() map[string]interface{} {
-	m.mu.RLock()
-	cacheSize := m.files.Len()
-	m.mu.RUnlock()
+	// Use cached directory size if recent (within 30 seconds)
+	now := time.Now().Unix()
+	lastCheck := m.lastSizeCheck.Load()
+	cachedSize := m.cachedDirSize.Load()
 
-	// Get actual disk usage statistics
-	totalSize, fileList, _ := m.scanCacheDirectory()
-
-	cacheHits := m.cacheHits.Load()
-	cacheMisses := m.cacheMisses.Load()
-	totalAccess := cacheHits + cacheMisses
-	hitRate := 0.0
-	if totalAccess > 0 {
-		hitRate = float64(cacheHits) / float64(totalAccess)
+	var totalSize int64
+	if cachedSize > 0 && (now-lastCheck) < 30 {
+		// Use cached value (fast)
+		totalSize = cachedSize
+	} else {
+		// Scan metadata directory (MUCH faster than scanning actual files)
+		// Falls back to actual cache scan if metadata doesn't exist
+		size, _, err := m.scanMetadataDirectory()
+		if err != nil || size == 0 {
+			// Fallback to actual cache scan
+			size, _, _ = m.scanCacheDirectory()
+		}
+		totalSize = size
+		m.cachedDirSize.Store(size)
+		m.lastSizeCheck.Store(now)
 	}
 
 	stats := map[string]interface{}{
-		"cache_hits":        cacheHits,
-		"cache_misses":      cacheMisses,
-		"cache_hit_rate":    hitRate,
-		"network_requests":  m.networkReads.Load(),
-		"network_bytes":     m.networkBytes.Load(),
-		"read_ops":          m.totalReadOps.Load(),
-		"read_bytes":        m.totalReadBytes.Load(),
-		"cached_files":      cacheSize,
-		"cache_disk_used":   totalSize,
-		"cache_disk_limit":  m.config.CacheDiskSize,
-		"cache_files_count": len(fileList),
-		"chunk_size":        m.config.ChunkSize,
-		"read_ahead_size":   m.config.ReadAheadSize,
+		"cache_dir_size":  totalSize,
+		"cache_dir_limit": m.config.CacheDiskSize,
+		"active_reads":    m.stats.activeReads.Load(),
+		"opened_files":    m.stats.openedFiles.Load(),
+		"chunk_size":      m.config.ChunkSize,
+		"read_ahead_size": m.config.ReadAheadSize,
+		"buffer_size":     m.config.BufferSize,
 	}
 
 	return stats
 }
 
-// TrackCacheHit increments cache hit counter
-func (m *Manager) TrackCacheHit() {
-	m.cacheHits.Add(1)
+// TrackFileAccess tracks file access patterns for smart caching
+func (m *Manager) TrackFileAccess(torrentName, fileName string, offset, fileSize int64, allFilesInTorrent []types.File) {
+	if !m.config.SmartCaching {
+		return
+	}
+
+	key := filepath.Join(torrentName, fileName)
+
+	// Get or create access info
+	info, _ := m.fileAccessTracker.LoadOrStore(key, &FileAccessInfo{
+		TorrentName:    torrentName,
+		FileName:       fileName,
+		FileSize:       fileSize,
+		LastAccessTime: time.Now(),
+		LastReadOffset: offset,
+	})
+
+	// Update access info
+	info.LastAccessTime = time.Now()
+	info.LastReadOffset = offset
+	info.AccessCount.Add(1)
+
+	// Check if user is near the end of the file (last 10%)
+	if fileSize > 0 && offset >= int64(float64(fileSize)*0.90) {
+		if !info.IsNearEnd.Load() {
+			info.IsNearEnd.Store(true)
+
+			// User is near end - detect and prefetch next episode
+			nextEpisode := m.detectNextEpisode(fileName, allFilesInTorrent)
+			if nextEpisode != nil {
+				info.NextEpisode = nextEpisode.Name
+				info.NextEpisodePath = filepath.Join(torrentName, nextEpisode.Name)
+
+				// Trigger prefetch of next episode
+				go m.prefetchNextEpisode(context.Background(), torrentName, *nextEpisode)
+			}
+		}
+	}
 }
 
-// TrackCacheMiss increments cache miss counter
-func (m *Manager) TrackCacheMiss() {
-	m.cacheMisses.Add(1)
+// detectNextEpisode detects the next episode in a torrent based on the current file
+func (m *Manager) detectNextEpisode(currentFileName string, allFiles []types.File) *types.File {
+	// Common episode patterns: S01E02, s01e02, 1x02, E02, Episode 02, etc.
+	episodePatterns := []string{
+		`[Ss](\d+)[Ee](\d+)`,      // S01E02 or s01e02
+		`(\d+)[xX](\d+)`,          // 1x02
+		`[Ee](\d+)`,               // E02
+		`[Ee]pisode[\s._-]?(\d+)`, // Episode 02
+		`[\s._-](\d+)[\s._-]`,     // Generic number (risky, last resort)
+	}
+
+	var currentEpisodeNum int
+	var currentSeasonNum int
+	matchedPattern := ""
+
+	// Try to extract episode number from current file
+	for _, pattern := range episodePatterns {
+		re := regexp.MustCompile(pattern)
+		matches := re.FindStringSubmatch(currentFileName)
+		if len(matches) > 0 {
+			matchedPattern = pattern
+			if len(matches) == 3 {
+				// Has season and episode
+				currentSeasonNum, _ = strconv.Atoi(matches[1])
+				currentEpisodeNum, _ = strconv.Atoi(matches[2])
+			} else if len(matches) == 2 {
+				// Episode only
+				currentEpisodeNum, _ = strconv.Atoi(matches[1])
+			}
+			break
+		}
+	}
+
+	if currentEpisodeNum == 0 {
+		return nil // Could not detect episode number
+	}
+
+	// Look for next episode
+	nextEpisodeNum := currentEpisodeNum + 1
+
+	// Search for next episode in files
+	for _, file := range allFiles {
+		// Skip non-video files
+		if !isVideoFile(file.Name) {
+			continue
+		}
+
+		// Try to match next episode
+		re := regexp.MustCompile(matchedPattern)
+		matches := re.FindStringSubmatch(file.Name)
+		if len(matches) > 0 {
+			var fileEpisodeNum int
+			var fileSeasonNum int
+
+			if len(matches) == 3 {
+				fileSeasonNum, _ = strconv.Atoi(matches[1])
+				fileEpisodeNum, _ = strconv.Atoi(matches[2])
+
+				// Check if it's the next episode in the same season
+				if fileSeasonNum == currentSeasonNum && fileEpisodeNum == nextEpisodeNum {
+					return &file
+				}
+			} else if len(matches) == 2 {
+				fileEpisodeNum, _ = strconv.Atoi(matches[1])
+
+				// Check if it's the next episode
+				if fileEpisodeNum == nextEpisodeNum {
+					return &file
+				}
+			}
+		}
+	}
+
+	return nil
 }
 
-// TrackNetworkRead increments network read counters
-func (m *Manager) TrackNetworkRead(bytes int64) {
-	m.networkReads.Add(1)
-	m.networkBytes.Add(bytes)
+// isVideoFile checks if a file is a video file based on extension
+func isVideoFile(fileName string) bool {
+	videoExts := []string{".mkv", ".mp4", ".avi", ".mov", ".wmv", ".flv", ".webm", ".m4v"}
+	ext := strings.ToLower(filepath.Ext(fileName))
+	for _, videoExt := range videoExts {
+		if ext == videoExt {
+			return true
+		}
+	}
+	return false
 }
 
-// TrackReadOp increments read operation counters
-func (m *Manager) TrackReadOp(bytes int64) {
-	m.totalReadOps.Add(1)
-	m.totalReadBytes.Add(bytes)
+// prefetchNextEpisode prefetches the beginning of the next episode
+func (m *Manager) prefetchNextEpisode(ctx context.Context, torrentName string, nextEpisode types.File) {
+	// Get or create sparse file for next episode
+	sf, err := m.GetOrCreateFile(torrentName, nextEpisode.Name, nextEpisode.Size)
+	if err != nil {
+		return
+	}
+
+	// Create a reader for the next episode
+	reader := NewReader(m.debrid, torrentName, nextEpisode, sf, m.config.ChunkSize, m.config.ReadAheadSize, m.config.MaxConcurrentReads, m.stats, m)
+
+	// Prefetch first few chunks (enough for instant start of next episode)
+	numChunksToPrefetch := int64(3) // Prefetch first 3 chunks (24MB with 8MB chunks)
+	totalChunks := (nextEpisode.Size + m.config.ChunkSize - 1) / m.config.ChunkSize
+	if numChunksToPrefetch > totalChunks {
+		numChunksToPrefetch = totalChunks
+	}
+
+	// Download chunks in background
+	for chunkIdx := int64(0); chunkIdx < numChunksToPrefetch; chunkIdx++ {
+		go reader.downloadChunkAsync(ctx, chunkIdx)
+	}
+}
+
+// === Utility Functions ===
+
+// sanitizeForPath makes a string safe for use in file paths
+func sanitizeForPath(name string) string {
+	// Replace problematic characters with underscores
+	replacer := strings.NewReplacer(
+		"/", "_",
+		"\\", "_",
+		":", "_",
+		"*", "_",
+		"?", "_",
+		"\"", "_",
+		"<", "_",
+		">", "_",
+		"|", "_",
+	)
+	sanitized := replacer.Replace(name)
+
+	// Limit length to prevent filesystem issues
+	if len(sanitized) > 200 {
+		sanitized = sanitized[:200]
+	}
+
+	return sanitized
 }

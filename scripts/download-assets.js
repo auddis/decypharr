@@ -101,7 +101,7 @@ async function downloadAssets() {
             await downloadFile(download.url, download.path);
         }
 
-        console.log('\n✅ External assets downloaded successfully!');
+        console.log('\nExternal assets downloaded successfully!');
 
     } catch (error) {
         console.error('💥 Error downloading assets:', error);
