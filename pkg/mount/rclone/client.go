@@ -37,6 +37,9 @@ func (m *Manager) performMount(ctx context.Context) error {
 	// Create mount directory if not on windows
 	if runtime.GOOS != "windows" {
 		_ = os.MkdirAll(cfg.MountPath, 0755)
+	} else {
+		// In fact, delete the mount if it exists, to avoid issues
+		_ = os.Remove(cfg.MountPath) // Ignore error
 	}
 
 	// Check if already mounted
