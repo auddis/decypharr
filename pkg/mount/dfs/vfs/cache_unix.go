@@ -13,10 +13,9 @@ func (m *Manager) getFileAccessTime(cacheKey string, fileInfo os.FileInfo) time.
 	// Try to get from in-memory tracking first
 	if cacheKey != "" {
 		if f, ok := m.files.Load(cacheKey); ok {
-			f.mu.RLock()
-			accessTime := f.lastAccess
-			f.mu.RUnlock()
-			return accessTime
+			if ts := f.lastAccessTime(); !ts.IsZero() {
+				return ts
+			}
 		}
 	}
 

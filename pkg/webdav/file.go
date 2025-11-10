@@ -85,7 +85,8 @@ func (h *Handler) streamWithRingBuffer(ctx context.Context, w http.ResponseWrite
 
 	pool := sync.Pool{
 		New: func() any {
-			return make([]byte, defaultChunkSize)
+			buf := make([]byte, defaultChunkSize)
+			return &buf
 		},
 	}
 
@@ -104,19 +105,20 @@ func (h *Handler) streamWithRingBuffer(ctx context.Context, w http.ResponseWrite
 				break readLoop
 			}
 
-			buf := pool.Get().([]byte)
+			bufPtr := pool.Get().(*[]byte)
+			buf := *bufPtr
 			n, err := src.Read(buf)
 
 			if n > 0 {
 				select {
 				case chunkCh <- bufferedChunk{buf: buf, n: n}:
 				case <-ctx.Done():
-					pool.Put(buf)
+					pool.Put(bufPtr)
 					readErr = ctx.Err()
 					break readLoop
 				}
 			} else {
-				pool.Put(buf)
+				pool.Put(bufPtr)
 			}
 
 			if err != nil {
@@ -149,7 +151,7 @@ writeLoop:
 			}
 
 			_, err := w.Write(chunk.buf[:chunk.n])
-			pool.Put(chunk.buf)
+			pool.Put(&chunk.buf)
 
 			if err != nil {
 				if isClientDisconnection(err) {

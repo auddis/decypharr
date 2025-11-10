@@ -322,7 +322,6 @@ func (d *Downloader) processStrm(torrent *storage.Torrent) error {
 
 	for _, file := range files {
 		strmFilePath := filepath.Join(torrentSymlinkPath, file.Name+".strm")
-		fmt.Println("Torrent", torrent.GetFolder(), "File:", file.Name)
 		streamURL, err := url.JoinPath(
 			d.strmURL,
 			"webdav",

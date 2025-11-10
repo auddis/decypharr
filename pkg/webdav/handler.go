@@ -1,7 +1,6 @@
 package webdav
 
 import (
-	"fmt"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -59,7 +58,10 @@ func (h *Handler) Routes() chi.Router {
 	r.Use(h.readinessMiddleware)
 	r.Use(h.commonMiddleware)
 	r.Use(middleware.AllowContentEncoding("gzip"))
-	//r.Use(h.authMiddleware)
+	cfg := config.Get()
+	if cfg.UseAuth && cfg.EnableWebdavAuth {
+		r.Use(h.authMiddleware)
+	}
 
 	r.HandleFunc("/", h.handleRoot)
 	r.HandleFunc("/{mount}", h.handleMount)
@@ -118,7 +120,6 @@ func (h *Handler) handleGroup(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) handleTorrentFolder(w http.ResponseWriter, r *http.Request) {
 	torrent := utils.PathUnescape(chi.URLParam(r, "torrent"))
-	fmt.Println("Handling torrent folder: ", torrent)
 
 	currentInfo, children := h.manager.GetTorrentChildren(torrent)
 	h.handler(currentInfo, children, w, r)
@@ -149,14 +150,11 @@ func (h *Handler) commonMiddleware(next http.Handler) http.Handler {
 
 func (h *Handler) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		cfg := config.Get()
-		if cfg.UseAuth && cfg.EnableWebdavAuth {
-			username, password, ok := r.BasicAuth()
-			if !ok || !config.VerifyAuth(username, password) {
-				w.Header().Set("WWW-Authenticate", `Basic realm="Restricted"`)
-				http.Error(w, "Unauthorized", http.StatusUnauthorized)
-				return
-			}
+		username, password, ok := r.BasicAuth()
+		if !ok || !config.VerifyAuth(username, password) {
+			w.Header().Set("WWW-Authenticate", `Basic realm="Restricted"`)
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
 		}
 		next.ServeHTTP(w, r)
 	})

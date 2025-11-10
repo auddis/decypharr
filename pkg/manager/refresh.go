@@ -43,8 +43,6 @@ func (m *Manager) refreshTorrents(ctx context.Context, debridName string, debrid
 			return nil, nil
 		}
 
-		m.logger.Debug().Str("debrid", debridName).Msgf("Found %d torrents from debrid", len(torrents))
-
 		// Build map of current torrents by infohash
 		currentByInfoHash := make(map[string]*types.Torrent, len(torrents))
 		for i := range torrents {
@@ -54,9 +52,6 @@ func (m *Manager) refreshTorrents(ctx context.Context, debridName string, debrid
 			}
 			currentByInfoHash[t.InfoHash] = t
 		}
-
-		// Clear the torrents slice to free memory (we only need the map now)
-		torrents = nil
 
 		// Stream through cached torrents to detect changes
 		newTorrents := make([]*types.Torrent, 0, 100)
@@ -120,27 +115,49 @@ func (m *Manager) refreshTorrents(ctx context.Context, debridName string, debrid
 		}
 		cachedInfoHashes = nil
 
-		// Handle deletions
+		// Handle deletions concurrently
 		if len(torrentsToDelete) > 0 {
 			m.logger.Debug().Str("debrid", debridName).Msgf("Deleting %d torrents with no remaining placements", len(torrentsToDelete))
-			for _, infohash := range torrentsToDelete {
-				if err := m.storage.Delete(infohash); err != nil {
-					m.logger.Error().Err(err).Str("infohash", infohash).Msg("Failed to delete torrent")
-				}
+
+			var deleteWg sync.WaitGroup
+			deleteChan := make(chan string, len(torrentsToDelete))
+
+			// Start delete workers
+			deleteWorkers := min(10, len(torrentsToDelete))
+			for i := 0; i < deleteWorkers; i++ {
+				deleteWg.Add(1)
+				go func() {
+					defer deleteWg.Done()
+					for infohash := range deleteChan {
+						if err := m.storage.Delete(infohash); err != nil {
+							m.logger.Error().Err(err).Str("infohash", infohash).Msg("Failed to delete torrent")
+						}
+					}
+				}()
 			}
+
+			// Send deletions to workers
+			for _, infohash := range torrentsToDelete {
+				deleteChan <- infohash
+			}
+			close(deleteChan)
+			deleteWg.Wait()
 		}
 		// Clear deletion slice
 		torrentsToDelete = nil
 
-		// Batch update torrents with changed placements
+		// Batch update torrents with changed placements - do this concurrently
+		var updateWg sync.WaitGroup
 		if len(torrentsToUpdate) > 0 {
 			m.logger.Debug().Str("debrid", debridName).Msgf("Updating %d torrents", len(torrentsToUpdate))
-			if err := m.storage.BatchAddOrUpdate(torrentsToUpdate); err != nil {
-				m.logger.Error().Err(err).Msg("Failed to batch update torrents")
-			}
+			updateWg.Add(1)
+			go func(torrents []*storage.Torrent) {
+				defer updateWg.Done()
+				if err := m.storage.BatchAddOrUpdate(torrents); err != nil {
+					m.logger.Error().Err(err).Msg("Failed to batch update torrents")
+				}
+			}(torrentsToUpdate)
 		}
-		// Clear update slice
-		torrentsToUpdate = nil
 
 		// Process new torrents/placements with batching
 		if len(newTorrents) > 0 {
@@ -190,8 +207,10 @@ func (m *Manager) refreshTorrents(ctx context.Context, debridName string, debrid
 				}
 			}()
 
-			// Workers
-			workers := 10
+			// Workers - scale based on torrent count for better throughput
+			workers := min(100, max(10, len(newTorrents)/10))
+			m.logger.Debug().Str("debrid", debridName).Msgf("Starting %d workers for processing %d torrents", workers, len(newTorrents))
+
 			for i := 0; i < workers; i++ {
 				processWg.Add(1)
 				go func() {
@@ -223,6 +242,9 @@ func (m *Manager) refreshTorrents(ctx context.Context, debridName string, debrid
 			m.logger.Debug().Str("debrid", debridName).Msgf("Processed %d new torrents/placements", processed)
 		}
 
+		// Wait for concurrent update to finish
+		updateWg.Wait()
+
 		// Force garbage collection to reclaim memory
 		runtime.GC()
 
@@ -245,19 +267,23 @@ func (m *Manager) processSyncTorrent(t *types.Torrent) (*storage.Torrent, error)
 		return nil, nil
 	}
 
-	// Check if files are complete
-	if len(t.Files) == 0 || !isComplete(t.Files) {
+	// Check if files are complete - only make API call if needed
+	needsUpdate := len(t.Files) == 0 || !isComplete(t.Files)
+	if needsUpdate {
+		// This is the main bottleneck - API call per torrent
+		// Consider: Could we batch UpdateTorrent calls? Depends on debrid API
 		if err := client.UpdateTorrent(t); err != nil {
 			return nil, err
 		}
-	}
 
-	if !isComplete(t.Files) {
-		m.logger.Debug().
-			Str("torrent_id", t.Id).
-			Str("torrent_name", t.Name).
-			Msg("Torrent still not complete after refresh")
-		return nil, nil
+		// Re-check completion after update
+		if !isComplete(t.Files) {
+			m.logger.Debug().
+				Str("torrent_id", t.Id).
+				Str("torrent_name", t.Name).
+				Msg("Torrent still not complete after refresh")
+			return nil, nil
+		}
 	}
 
 	// Parse added timestamp
@@ -267,6 +293,8 @@ func (m *Manager) processSyncTorrent(t *types.Torrent) (*storage.Torrent, error)
 	}
 
 	// Check if we have an existing managed torrent
+	// Note: This is a database read per torrent - could be optimized with batch reads
+	// or an in-memory cache, but storage.Get is likely fast (indexed by InfoHash)
 	mt, err := m.storage.Get(t.InfoHash)
 	if err != nil {
 		// Create new managed torrent

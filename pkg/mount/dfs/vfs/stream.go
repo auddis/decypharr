@@ -22,11 +22,11 @@ type StreamingReader struct {
 	endOffset   int64
 
 	// Ring buffer settings
-	chunkSize  int64         // Size of each buffered chunk (512KB for quick startup)
-	queueDepth int           // Number of chunks to buffer ahead (4 = 2MB buffer)
-	chunkCh    chan []byte   // Buffered channel for chunks
-	errCh      chan error    // Error channel
-	pool       *sync.Pool    // Buffer pool for zero-allocation
+	chunkSize  int64       // Size of each buffered chunk (512KB for quick startup)
+	queueDepth int         // Number of chunks to buffer ahead (4 = 2MB buffer)
+	chunkCh    chan []byte // Buffered channel for chunks
+	errCh      chan error  // Error channel
+	pool       *sync.Pool  // Buffer pool for zero-allocation
 
 	// State
 	ctx        context.Context
@@ -40,8 +40,8 @@ type StreamingReader struct {
 }
 
 const (
-	streamChunkSize  = 512 * 1024 // 512KB per chunk for fast startup
-	streamQueueDepth = 4          // Total buffered data ≈ 2MB
+	streamChunkSize  = 256 * 1024 // 256KB per chunk - optimal for video players
+	streamQueueDepth = 8          // Total buffered data = 2MB, more responsive
 )
 
 // NewStreamingReader creates a streaming reader with ring buffer
@@ -113,7 +113,7 @@ func (sr *StreamingReader) readLoop() {
 
 		// Read chunk
 		n, err := io.ReadFull(rc, buf)
-		if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+		if err != nil && err != io.EOF && !errors.Is(err, io.ErrUnexpectedEOF) {
 			sr.pool.Put(bufPtr)
 			readErr = fmt.Errorf("read chunk at offset %d: %w", currentOffset, err)
 			break
@@ -159,7 +159,7 @@ func (sr *StreamingReader) readLoop() {
 		}
 
 		// Check for EOF
-		if err == io.EOF || err == io.ErrUnexpectedEOF {
+		if err == io.EOF || errors.Is(err, io.ErrUnexpectedEOF) {
 			readErr = nil
 			break
 		}
@@ -195,18 +195,10 @@ func (sr *StreamingReader) Read(p []byte) (int, error) {
 
 		// Copy chunk to output buffer
 		n := copy(p, chunk)
-		if n < len(chunk) {
-			// Buffer too small, put remainder back
-			// This shouldn't happen in practice since we use fixed chunk sizes
-			// But handle it gracefully
-			remainder := chunk[n:]
-			go func() {
-				select {
-				case sr.chunkCh <- remainder:
-				case <-sr.ctx.Done():
-				}
-			}()
-		}
+
+		// If buffer is too small, this is a short read
+		// Return what we copied and let caller handle it
+		// This follows io.Reader semantics better than trying to save remainder
 		return n, nil
 
 	case err := <-sr.errCh:
@@ -242,31 +234,11 @@ func (sr *StreamingReader) IsComplete() bool {
 	return sr.readerDone.Load()
 }
 
-// shouldUseStreaming determines if we should use streaming mode for this read
-// Streaming is beneficial for:
-// 1. Sequential reads (video playback)
-// 2. Large reads (> 4MB)
-// 3. Reads from beginning of file or continuation of previous read
-func shouldUseStreaming(offset, size int64, lastReadOffset *atomic.Int64) bool {
-	// Check if this is a sequential read
-	if lastReadOffset != nil {
-		lastOffset := lastReadOffset.Load()
-		// Sequential if reading from last position or within 1MB of it
-		if lastOffset >= 0 && offset >= lastOffset && offset-lastOffset < 1*1024*1024 {
-			// Large sequential read - use streaming
-			if size >= 4*1024*1024 {
-				return true
-			}
-		}
-	}
-
-	// Starting from beginning with large read
-	if offset == 0 && size >= 4*1024*1024 {
-		return true
-	}
-
-	return false
-}
+// Removed shouldUseStreaming - we now always use streaming for network reads
+// StreamingReader is efficient for both sequential AND random reads because:
+// 1. Returns data immediately as chunks arrive (no blocking)
+// 2. Background caching continues after first chunk
+// 3. Small overhead for random reads is negligible vs instant playback benefit
 
 // streamingReadAt performs a streaming read using the ring buffer
 // This is optimized for sequential playback with instant startup
@@ -280,7 +252,10 @@ func (f *File) streamingReadAt(ctx context.Context, p []byte, offset int64) (int
 	// Create streaming reader
 	endOffset := offset + readSize - 1
 	sr := NewStreamingReader(ctx, f.manager, f.info, offset, endOffset, f)
-	defer sr.Close() // Ensure cleanup even if we return early
+	defer func() {
+		// Ensure cleanup happens
+		_ = sr.Close()
+	}()
 
 	// Read all data from stream
 	totalRead := 0
@@ -289,15 +264,31 @@ func (f *File) streamingReadAt(ctx context.Context, p []byte, offset int64) (int
 		totalRead += n
 
 		if err != nil {
-			if errors.Is(err, io.EOF) && totalRead > 0 {
+			if errors.Is(err, io.EOF) {
+				// EOF is expected when we've read all available data
+				if totalRead > 0 {
+					return totalRead, nil
+				}
+				return 0, io.EOF
+			}
+			// Return actual error with any data read so far
+			if totalRead > 0 {
 				return totalRead, nil
 			}
-			return totalRead, err
+			return 0, err
 		}
 
 		// Check if we've read enough
 		if totalRead >= len(p) || totalRead >= int(readSize) {
 			break
+		}
+
+		// Check context cancellation
+		if ctx.Err() != nil {
+			if totalRead > 0 {
+				return totalRead, nil
+			}
+			return 0, ctx.Err()
 		}
 	}
 

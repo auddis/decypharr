@@ -64,7 +64,7 @@ type File struct {
 	stats           *StatsTracker
 	manager         *manager.Manager // Reference to save metadata
 	vfsManager      *Manager         // Reference to VFS manager
-	lastAccess      time.Time
+	lastAccess      atomic.Int64
 	lastReadOffset  atomic.Int64 // Track last read offset for sequential detection
 	modTime         time.Time
 	dirty           bool // Has unflushed changes to metadata
@@ -122,11 +122,12 @@ func newFile(cacheDir string, info *manager.FileInfo, chunkSize, readAhead int64
 		stats:       stats,
 		manager:     manager,
 		vfsManager:  vfsManager,
-		lastAccess:  time.Now(),
-		modTime:     time.Now(),
+		modTime:     info.ModTime(),
 		dirty:       false,
 		closeChan:   make(chan struct{}),
 	}
+
+	f.lastAccess.Store(time.Now().UnixNano())
 
 	// Initialize last read offset to -1 (no previous read)
 	f.lastReadOffset.Store(-1)
@@ -134,12 +135,91 @@ func newFile(cacheDir string, info *manager.FileInfo, chunkSize, readAhead int64
 	return f, nil
 }
 
+func (f *File) touchAccess() {
+	f.lastAccess.Store(time.Now().UnixNano())
+}
+
+func (f *File) lastAccessTime() time.Time {
+	ts := f.lastAccess.Load()
+	if ts == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, ts)
+}
+
+// ensureFileOpen lazily (re)opens the on-disk sparse file if it was closed.
+func (f *File) ensureFileOpen() error {
+	f.mu.RLock()
+	if f.file != nil {
+		f.mu.RUnlock()
+		return nil
+	}
+	f.mu.RUnlock()
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if f.file != nil {
+		return nil
+	}
+
+	file, err := os.OpenFile(f.path, os.O_RDWR, 0644)
+	if err != nil {
+		return fmt.Errorf("reopen cache file: %w", err)
+	}
+	f.file = file
+
+	if f.memBuffer != nil {
+		f.memBuffer.AttachFile(file)
+	}
+
+	return nil
+}
+
 // ensureRangesLoaded ensures ranges are loaded exactly once (thread-safe)
 func (f *File) ensureRangesLoaded() {
 	f.rangesOnce.Do(func() {
 		f.ranges = ranges.New()
-		_ = f.scanExistingData()
+		if !f.loadCachedMetadata() {
+			_ = f.scanExistingData()
+		}
 	})
+}
+
+func (f *File) loadCachedMetadata() bool {
+	if f.vfsManager == nil {
+		return false
+	}
+
+	meta, err := f.vfsManager.loadMetadata(f.info.Parent(), f.info.Name())
+	if err != nil || meta == nil {
+		return false
+	}
+
+	for _, r := range meta.Ranges {
+		f.ranges.Insert(r)
+	}
+
+	if !meta.ATime.IsZero() {
+		f.lastAccess.Store(meta.ATime.UnixNano())
+	}
+	if !meta.ModTime.IsZero() {
+		f.modTime = meta.ModTime
+	}
+
+	var cached int64
+	for _, r := range meta.Ranges {
+		cached += r.Size
+	}
+	if cached > 0 {
+		f.bytesDownloaded.Store(cached)
+	}
+
+	f.mu.Lock()
+	f.dirty = meta.Dirty
+	f.mu.Unlock()
+
+	return true
 }
 
 // scanExistingData scans the file to detect which chunks already have data
@@ -194,10 +274,14 @@ func (f *File) readAt(p []byte, offset int64) (n int, cached bool, err error) {
 	// Ensure ranges are loaded exactly once (no lock upgrade needed!)
 	f.ensureRangesLoaded()
 
+	if err := f.ensureFileOpen(); err != nil {
+		return 0, false, err
+	}
+
 	f.mu.RLock()
 	defer f.mu.RUnlock()
 
-	f.lastAccess = time.Now()
+	f.touchAccess()
 
 	requestedRange := ranges.Range{Pos: offset, Size: int64(len(p))}
 
@@ -245,6 +329,10 @@ func (f *File) WriteAt(p []byte, offset int64) (int, error) {
 	// Ensure ranges are loaded exactly once (no lock upgrade needed!)
 	f.ensureRangesLoaded()
 
+	if err := f.ensureFileOpen(); err != nil {
+		return 0, err
+	}
+
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -263,12 +351,16 @@ func (f *File) WriteAt(p []byte, offset int64) (int, error) {
 		f.dirty = true
 	}
 
-	f.lastAccess = time.Now()
+	f.touchAccess()
 	return n, nil
 }
 
 // Sync flushes data to disk
 func (f *File) Sync() error {
+	if err := f.ensureFileOpen(); err != nil {
+		return err
+	}
+
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -282,6 +374,11 @@ func (f *File) Sync() error {
 
 // closeFD closes the file descriptor
 func (f *File) closeFD() error {
+	if f.memBuffer != nil {
+		_ = f.memBuffer.Flush()
+		f.memBuffer.AttachFile(nil)
+	}
+
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -295,23 +392,25 @@ func (f *File) closeFD() error {
 
 // Close closes the file and stops all downloads
 func (f *File) Close() error {
-	// Stop all downloads first
+	var firstErr error
+
+	if err := f.persistMetadata(true); err != nil {
+		firstErr = err
+	}
+
 	_ = f.CloseDownloads()
 
-	// Close memory buffer and flush pending data
+	if err := f.closeFD(); err != nil && firstErr == nil {
+		firstErr = err
+	}
+
 	if f.memBuffer != nil {
-		_ = f.memBuffer.Close()
+		if err := f.memBuffer.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
 	}
 
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	if f.file != nil {
-		err := f.file.Close()
-		f.file = nil
-		return err
-	}
-	return nil
+	return firstErr
 }
 
 // removeFromDisk removes the sparse file from disk
@@ -329,6 +428,48 @@ func (f *File) removeFromDisk() error {
 	if err := os.Remove(f.path); err != nil && !os.IsNotExist(err) {
 		return err
 	}
+
+	return nil
+}
+
+func (f *File) persistMetadata(force bool) error {
+	if f.vfsManager == nil {
+		return nil
+	}
+
+	f.ensureRangesLoaded()
+
+	f.mu.RLock()
+	dirty := f.dirty
+	modTime := f.modTime
+	f.mu.RUnlock()
+
+	if !dirty && !force {
+		return nil
+	}
+
+	meta := &Metadata{
+		ModTime: modTime,
+		ATime:   f.lastAccessTime(),
+		Size:    f.info.Size(),
+		Ranges:  f.ranges.GetRanges(),
+		Dirty:   false,
+	}
+
+	if meta.ModTime.IsZero() {
+		meta.ModTime = time.Now()
+	}
+	if meta.ATime.IsZero() {
+		meta.ATime = time.Now()
+	}
+
+	if err := f.vfsManager.saveMetadata(f.info.Parent(), f.info.Name(), meta); err != nil {
+		return err
+	}
+
+	f.mu.Lock()
+	f.dirty = false
+	f.mu.Unlock()
 
 	return nil
 }
@@ -414,6 +555,8 @@ func (f *File) ReadAt(ctx context.Context, p []byte, offset int64) (int, error) 
 		p = p[:readSize]
 	}
 
+	f.touchAccess()
+
 	// FAST PATH: Check memory buffer first (< 1ms)
 	if f.memBuffer != nil {
 		data, found := f.memBuffer.Get(offset, readSize)
@@ -448,52 +591,24 @@ func (f *File) ReadAt(ctx context.Context, p []byte, offset int64) (int, error) 
 	f.stats.TrackActiveRead(1)
 	defer f.stats.TrackActiveRead(-1)
 
-	// OPTIMIZATION: Use streaming mode for large sequential reads (video playback)
-	// This provides instant playback startup similar to WebDAV ring buffer
-	// Streaming delivers data directly to client and caches in memory
-	if shouldUseStreaming(offset, readSize, &f.lastReadOffset) {
-		// Use ring buffer streaming for instant playback
-		n, err := f.streamingReadAt(ctx, p, offset)
-		if err == nil {
-			// Store in memory buffer for future fast access
-			if f.memBuffer != nil && n > 0 {
-				_ = f.memBuffer.Put(offset, p[:n])
-			}
-			// Update last read offset for sequential detection
-			f.lastReadOffset.Store(offset + int64(n))
+	// ALWAYS use streaming for network reads - provides instant playback
+	// StreamingReader efficiently handles ALL read patterns:
+	// - Sequential reads (video): Instant startup, continuous streaming
+	// - Random reads (seeks): Returns first chunk immediately
+	// - Small reads (metadata): Minimal overhead, quick return
+	n, err := f.streamingReadAt(ctx, p, offset)
+	if err == nil {
+		// Store in memory buffer for future fast access
+		if f.memBuffer != nil && n > 0 {
+			_ = f.memBuffer.Put(offset, p[:n])
 		}
-		return n, err
+		// Update last read offset
+		f.lastReadOffset.Store(offset + int64(n))
+
+		// Start background prefetch for smooth playback
+		go f.aggressiveSequentialPrefetch(ctx, offset+readSize)
 	}
-
-	// FALLBACK: Use chunk-based caching for random/small reads
-	// Download directly to memory (FAST PATH)
-	// Network → Memory → Async Disk Flush
-	data, err := f.DownloadToMemory(ctx, offset, readSize)
-	if err != nil {
-		return 0, fmt.Errorf("download to memory: %w", err)
-	}
-
-	// Store in memory buffer (this will trigger async disk flush)
-	if f.memBuffer != nil && len(data) > 0 {
-		if err := f.memBuffer.Put(offset, data); err != nil {
-			// Memory buffer full, fall back to disk write
-			_, _ = f.WriteAt(data, offset)
-		}
-	} else {
-		// No memory buffer, write directly to disk
-		_, _ = f.WriteAt(data, offset)
-	}
-
-	// Copy to output buffer
-	n := copy(p, data)
-
-	// Update last read offset
-	f.lastReadOffset.Store(offset + int64(n))
-
-	// Start background prefetch for smooth playback
-	go f.aggressiveSequentialPrefetch(ctx, offset+readSize)
-
-	return n, nil
+	return n, err
 }
 
 // aggressiveSequentialPrefetch downloads chunks ahead for smooth playback

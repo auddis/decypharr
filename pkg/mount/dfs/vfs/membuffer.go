@@ -3,9 +3,7 @@ package vfs
 import (
 	"container/list"
 	"context"
-	"errors"
 	"fmt"
-	"io"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -37,13 +35,15 @@ type MemoryBuffer struct {
 
 // BufferChunk represents a chunk of data in memory
 type BufferChunk struct {
-	offset   int64
-	data     []byte
-	dirty    atomic.Bool   // Needs to be flushed to disk
-	accessed atomic.Int64  // Last access time (Unix nano)
-	lruElem  *list.Element // Position in LRU list
-	flushing atomic.Bool   // Currently being flushed
-	mu       sync.RWMutex  // Protects data modifications
+	offset     int64
+	data       []byte
+	dirty      atomic.Bool   // Needs to be flushed to disk
+	accessed   atomic.Int64  // Last access time (Unix nano)
+	lruElem    *list.Element // Position in LRU list
+	flushing   atomic.Bool   // Currently being flushed
+	flushDone  chan struct{} // Signals flush completion
+	mu         sync.RWMutex  // Protects data modifications
+	pinned     atomic.Bool   // Prevents eviction (dirty chunks being flushed)
 }
 
 // MemBufferStats tracks memory buffer performance
@@ -74,43 +74,55 @@ func NewMemoryBuffer(ctx context.Context, maxSize, bufferSize int64) *MemoryBuff
 	return mb
 }
 
+// updateLRU moves chunk to front of LRU list
+func (mb *MemoryBuffer) updateLRU(chunk *BufferChunk) {
+	mb.chunksMu.Lock()
+	defer mb.chunksMu.Unlock()
+
+	if chunk.lruElem != nil {
+		mb.chunkList.MoveToFront(chunk.lruElem)
+	}
+}
+
 // AttachFile attaches a file for async flushing
 func (mb *MemoryBuffer) AttachFile(file *os.File) {
+	if file == nil && mb.flusher == nil {
+		return
+	}
+
 	if mb.flusher == nil {
 		mb.flusher = NewAsyncFlusher(mb.closeCtx, file, mb.flushQueue)
 		go mb.flusher.Run()
+		return
 	}
+
+	mb.flusher.UpdateFile(file)
 }
 
 // Get retrieves data from memory if available
 // Returns (data, found)
 func (mb *MemoryBuffer) Get(offset, size int64) ([]byte, bool) {
 	mb.chunksMu.RLock()
-	defer mb.chunksMu.RUnlock()
 
 	// Check if we can serve this from a single chunk
 	chunk, exists := mb.chunks[offset]
 	if exists && int64(len(chunk.data)) >= size {
 		chunk.mu.RLock()
-		defer chunk.mu.RUnlock()
+		data := chunk.data
+		chunk.mu.RUnlock()
 
 		// Update access time
 		chunk.accessed.Store(time.Now().UnixNano())
-
-		// Move to front of LRU (most recently used)
 		mb.chunksMu.RUnlock()
-		mb.chunksMu.Lock()
-		if chunk.lruElem != nil {
-			mb.chunkList.MoveToFront(chunk.lruElem)
-		}
-		mb.chunksMu.Unlock()
-		mb.chunksMu.RLock()
+
+		// Update LRU separately (no double-locking)
+		mb.updateLRU(chunk)
 
 		mb.stats.Hits.Add(1)
 
 		// Return copy to avoid data races
 		result := make([]byte, size)
-		copy(result, chunk.data[:size])
+		copy(result, data[:size])
 		return result, true
 	}
 
@@ -119,10 +131,12 @@ func (mb *MemoryBuffer) Get(offset, size int64) ([]byte, bool) {
 		result := make([]byte, 0, size)
 		currentOffset := offset
 		remaining := size
+		chunksToUpdate := make([]*BufferChunk, 0, 4)
 
 		for remaining > 0 {
 			chunk, exists := mb.chunks[currentOffset]
 			if !exists {
+				mb.chunksMu.RUnlock()
 				mb.stats.Misses.Add(1)
 				return nil, false
 			}
@@ -136,6 +150,7 @@ func (mb *MemoryBuffer) Get(offset, size int64) ([]byte, bool) {
 			availableInChunk := int64(len(chunkData)) - offsetInChunk
 
 			if availableInChunk <= 0 {
+				mb.chunksMu.RUnlock()
 				mb.stats.Misses.Add(1)
 				return nil, false
 			}
@@ -149,14 +164,23 @@ func (mb *MemoryBuffer) Get(offset, size int64) ([]byte, bool) {
 			currentOffset += toRead
 			remaining -= toRead
 
-			// Update access time
+			// Update access time and track for LRU update
 			chunk.accessed.Store(time.Now().UnixNano())
+			chunksToUpdate = append(chunksToUpdate, chunk)
+		}
+
+		mb.chunksMu.RUnlock()
+
+		// Update LRU for all accessed chunks
+		for _, chunk := range chunksToUpdate {
+			mb.updateLRU(chunk)
 		}
 
 		mb.stats.Hits.Add(1)
 		return result, true
 	}
 
+	mb.chunksMu.RUnlock()
 	mb.stats.Misses.Add(1)
 	return nil, false
 }
@@ -168,26 +192,74 @@ func (mb *MemoryBuffer) Put(offset int64, data []byte) error {
 		return nil
 	}
 
-	// Evict if necessary to make space
-	for mb.totalSize.Load()+dataSize > mb.maxSize {
-		if !mb.evictLRU() {
+	// Lock early to prevent races
+	mb.chunksMu.Lock()
+	defer mb.chunksMu.Unlock()
+
+	// Calculate space needed
+	additionalNeeded := dataSize
+	if existing, ok := mb.chunks[offset]; ok {
+		diff := dataSize - int64(len(existing.data))
+		if diff > 0 {
+			additionalNeeded = diff
+		} else {
+			additionalNeeded = 0
+		}
+	}
+
+	// Evict if necessary to make space (while holding lock)
+	for additionalNeeded > 0 && mb.totalSize.Load()+additionalNeeded > mb.maxSize {
+		if !mb.evictLRULocked() {
 			// Can't evict anymore, fail
 			return fmt.Errorf("memory buffer full, cannot evict")
 		}
 	}
 
-	mb.chunksMu.Lock()
-	defer mb.chunksMu.Unlock()
+	// Now we have guaranteed space
+	if existing, ok := mb.chunks[offset]; ok {
+		now := time.Now().UnixNano()
+		oldSize := int64(len(existing.data))
+
+		// Reallocate only if size changed
+		if oldSize != dataSize {
+			existing.data = make([]byte, dataSize)
+			mb.totalSize.Add(dataSize - oldSize)
+		}
+
+		copy(existing.data, data)
+		existing.accessed.Store(now)
+		existing.dirty.Store(true)
+		existing.pinned.Store(true) // Pin while dirty to prevent premature eviction
+
+		if existing.lruElem != nil {
+			mb.chunkList.MoveToFront(existing.lruElem)
+		} else {
+			existing.lruElem = mb.chunkList.PushFront(offset)
+		}
+
+		mb.stats.MemoryUsed.Store(mb.totalSize.Load())
+
+		// Queue for async flush
+		select {
+		case mb.flushQueue <- existing:
+		default:
+			// Queue full - chunk will be flushed on next opportunity or Close()
+		}
+
+		return nil
+	}
 
 	// Create new chunk
 	chunk := &BufferChunk{
-		offset:   offset,
-		data:     make([]byte, len(data)),
-		accessed: atomic.Int64{},
+		offset:    offset,
+		data:      make([]byte, dataSize),
+		accessed:  atomic.Int64{},
+		flushDone: make(chan struct{}),
 	}
 	copy(chunk.data, data)
 	chunk.accessed.Store(time.Now().UnixNano())
 	chunk.dirty.Store(true)
+	chunk.pinned.Store(true) // Pin while dirty
 
 	// Add to map and LRU list
 	mb.chunks[offset] = chunk
@@ -197,55 +269,67 @@ func (mb *MemoryBuffer) Put(offset int64, data []byte) error {
 	mb.totalSize.Add(dataSize)
 	mb.stats.MemoryUsed.Store(mb.totalSize.Load())
 
-	// Queue for async flush (non-blocking)
+	// Queue for async flush
 	select {
 	case mb.flushQueue <- chunk:
 		// Queued successfully
 	default:
-		// Queue full, will flush later
+		// Queue full - chunk will be flushed on next opportunity or Close()
 	}
 
 	return nil
 }
 
-// evictLRU evicts the least recently used chunk
-func (mb *MemoryBuffer) evictLRU() bool {
-	mb.chunksMu.Lock()
-	defer mb.chunksMu.Unlock()
-
-	// Get least recently used chunk (back of list)
+// evictLRULocked evicts the least recently used chunk (must be called with lock held)
+func (mb *MemoryBuffer) evictLRULocked() bool {
+	// Scan from back of LRU list to find an evictable chunk
 	elem := mb.chunkList.Back()
-	if elem == nil {
-		return false // Nothing to evict
-	}
+	for elem != nil {
+		offset := elem.Value.(int64)
+		chunk, exists := mb.chunks[offset]
 
-	offset := elem.Value.(int64)
-	chunk, exists := mb.chunks[offset]
-	if !exists {
-		// Inconsistent state, remove from list
+		if !exists {
+			// Inconsistent state, remove from list and continue
+			next := elem.Prev()
+			mb.chunkList.Remove(elem)
+			elem = next
+			continue
+		}
+
+		// Skip pinned chunks (dirty chunks being flushed)
+		if chunk.pinned.Load() {
+			elem = elem.Prev()
+			continue
+		}
+
+		// Found evictable chunk
+		// If it's dirty but not pinned, wait for flush to complete
+		if chunk.dirty.Load() {
+			// Try to wait briefly for flush
+			select {
+			case <-chunk.flushDone:
+				// Flush completed
+			default:
+				// Still flushing, skip this one
+				elem = elem.Prev()
+				continue
+			}
+		}
+
+		// Remove from map and list
+		delete(mb.chunks, offset)
 		mb.chunkList.Remove(elem)
+
+		// Update total size
+		chunkSize := int64(len(chunk.data))
+		mb.totalSize.Add(-chunkSize)
+		mb.stats.MemoryUsed.Store(mb.totalSize.Load())
+		mb.stats.Evictions.Add(1)
+
 		return true
 	}
 
-	// If chunk is dirty and not currently flushing, flush it synchronously
-	// This ensures we don't lose data
-	if chunk.dirty.Load() && !chunk.flushing.Load() {
-		// TODO: Could make this async, but safer to flush before evict
-		// For now, just mark as clean to avoid data loss warnings
-		// The async flusher might still flush it if it's in the queue
-	}
-
-	// Remove from map and list
-	delete(mb.chunks, offset)
-	mb.chunkList.Remove(elem)
-
-	// Update total size
-	chunkSize := int64(len(chunk.data))
-	mb.totalSize.Add(-chunkSize)
-	mb.stats.MemoryUsed.Store(mb.totalSize.Load())
-	mb.stats.Evictions.Add(1)
-
-	return true
+	return false // No evictable chunks found
 }
 
 // Flush flushes all dirty chunks to disk (blocking)
@@ -253,13 +337,13 @@ func (mb *MemoryBuffer) Flush() error {
 	mb.chunksMu.RLock()
 	dirtyChunks := make([]*BufferChunk, 0)
 	for _, chunk := range mb.chunks {
-		if chunk.dirty.Load() && !chunk.flushing.Load() {
+		if chunk.dirty.Load() {
 			dirtyChunks = append(dirtyChunks, chunk)
 		}
 	}
 	mb.chunksMu.RUnlock()
 
-	// Flush all dirty chunks
+	// Queue all dirty chunks for flushing
 	for _, chunk := range dirtyChunks {
 		select {
 		case mb.flushQueue <- chunk:
@@ -269,10 +353,30 @@ func (mb *MemoryBuffer) Flush() error {
 		}
 	}
 
-	// Wait a bit for flushes to complete
-	time.Sleep(100 * time.Millisecond)
+	// Wait for all dirty chunks to be flushed
+	timeout := time.After(30 * time.Second)
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
 
-	return nil
+	for {
+		select {
+		case <-timeout:
+			return fmt.Errorf("flush timeout: some chunks still dirty")
+		case <-ticker.C:
+			allClean := true
+			for _, chunk := range dirtyChunks {
+				if chunk.dirty.Load() {
+					allClean = false
+					break
+				}
+			}
+			if allClean {
+				return nil
+			}
+		case <-mb.closeCtx.Done():
+			return mb.closeCtx.Err()
+		}
+	}
 }
 
 // Close closes the memory buffer and flushes pending data
@@ -325,6 +429,7 @@ type AsyncFlusher struct {
 	file       *os.File
 	flushQueue chan *BufferChunk
 	wg         sync.WaitGroup
+	mu         sync.RWMutex
 }
 
 // NewAsyncFlusher creates a new async flusher
@@ -359,13 +464,26 @@ func (af *AsyncFlusher) Run() {
 			offset := chunk.offset
 			chunk.mu.RUnlock()
 
-			if af.file != nil {
-				n, err := af.file.WriteAt(data, offset)
+			af.mu.RLock()
+			file := af.file
+			af.mu.RUnlock()
+
+			if file != nil {
+				n, err := file.WriteAt(data, offset)
 				if err == nil && n == len(data) {
 					// Successfully flushed
 					chunk.dirty.Store(false)
+					chunk.pinned.Store(false) // Unpin after successful flush
+
+					// Signal flush completion
+					select {
+					case <-chunk.flushDone:
+						// Already closed
+					default:
+						close(chunk.flushDone)
+					}
 				}
-				// Even on error, mark as not flushing so it can be retried
+				// On error, mark as not flushing so it can be retried
 			}
 
 			chunk.flushing.Store(false)
@@ -375,10 +493,28 @@ func (af *AsyncFlusher) Run() {
 			for {
 				select {
 				case chunk := <-af.flushQueue:
-					if chunk != nil && chunk.dirty.Load() && af.file != nil {
-						chunk.mu.RLock()
-						_, _ = af.file.WriteAt(chunk.data, chunk.offset)
-						chunk.mu.RUnlock()
+					if chunk != nil && chunk.dirty.Load() {
+						af.mu.RLock()
+						file := af.file
+						af.mu.RUnlock()
+
+						if file != nil {
+							chunk.mu.RLock()
+							n, err := file.WriteAt(chunk.data, chunk.offset)
+							chunk.mu.RUnlock()
+
+							if err == nil && n == len(chunk.data) {
+								chunk.dirty.Store(false)
+								chunk.pinned.Store(false)
+
+								select {
+								case <-chunk.flushDone:
+								default:
+									close(chunk.flushDone)
+								}
+							}
+						}
+						chunk.flushing.Store(false)
 					}
 				default:
 					return
@@ -393,22 +529,12 @@ func (af *AsyncFlusher) Wait() {
 	af.wg.Wait()
 }
 
-// DownloadToMemory downloads data directly to memory buffer
-// This is a helper function to integrate with the existing download flow
-func (f *File) DownloadToMemory(ctx context.Context, offset, size int64) ([]byte, error) {
-	end := offset + size - 1
-	rc, err := f.manager.StreamReader(ctx, f.info.Parent(), f.info.Name(), offset, end)
-	if err != nil {
-		return nil, fmt.Errorf("get download link: %w", err)
-	}
-	defer rc.Close()
-
-	// Read directly into memory
-	data := make([]byte, size)
-	n, err := io.ReadFull(rc, data)
-	if err != nil && err != io.EOF && !errors.Is(err, io.ErrUnexpectedEOF) {
-		return nil, fmt.Errorf("download data: %w", err)
-	}
-
-	return data[:n], nil
+// UpdateFile swaps the file handle used by the async flusher.
+func (af *AsyncFlusher) UpdateFile(file *os.File) {
+	af.mu.Lock()
+	af.file = file
+	af.mu.Unlock()
 }
+
+// Note: DownloadToMemory was removed - all network reads now use StreamingReader
+// which provides instant playback startup and progressive downloading.

@@ -2,7 +2,6 @@ package dfs
 
 import (
 	"context"
-	"path/filepath"
 	"sync/atomic"
 	"syscall"
 
@@ -211,7 +210,8 @@ func (d *Dir) Unlink(ctx context.Context, name string) syscall.Errno {
 		}
 
 		// Close the file from range_manager
-		_ = d.vfs.CloseFile(filepath.Join(fileNode.info.Parent(), fileNode.info.Name()))
+		cacheKey := vfs.BuildCacheKey(fileNode.info.Parent(), fileNode.info.Name())
+		_ = d.vfs.CloseFile(cacheKey)
 	default:
 		return syscall.EPERM
 	}

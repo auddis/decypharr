@@ -489,9 +489,6 @@ func (r *Reader) readFiles() error {
 		fileInfo, err := r.parseFileHeader(completeHeader, pos)
 		if err == nil && fileInfo != nil {
 			r.Files = append(r.Files, fileInfo)
-			pos = fileInfo.NextOffset
-		} else {
-			pos += int64(headSize)
 		}
 	} else {
 		// Skip non-file block
@@ -521,9 +518,6 @@ func (r *Reader) readFiles() error {
 					return fmt.Errorf("failed to read data size after retries: %w", err)
 				}
 			}
-
-			dataSize := int64(binary.LittleEndian.Uint32(sizeData))
-			pos += dataSize
 		}
 	}
 

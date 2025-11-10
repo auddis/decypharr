@@ -111,6 +111,7 @@ func NewManager(manager *manager.Manager, fuseConfig *config.FuseConfig) *Manage
 
 	go m.closeIdleFilesLoop()
 	go m.Cleanup(ctx)
+	go m.metadataPersistLoop()
 
 	return m
 }
@@ -129,16 +130,34 @@ func (m *Manager) closeIdleFilesLoop() {
 	}
 }
 
+func (m *Manager) metadataPersistLoop() {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			m.flushDirtyMetadata()
+		case <-m.closeCtx.Done():
+			return
+		}
+	}
+}
+
+func (m *Manager) flushDirtyMetadata() {
+	m.files.Range(func(key string, f *File) bool {
+		_ = f.persistMetadata(false)
+		return true
+	})
+}
+
 func (m *Manager) closeIdleFiles() {
-	threshold := time.Now().Add(-m.config.FileIdleTimeout)
+	threshold := time.Now().Add(-m.config.FileIdleTimeout).UnixNano()
 
 	// Iterate through all files and close idle ones
 	m.files.Range(func(key string, f *File) bool {
-		f.mu.RLock()
-		shouldClose := f.lastAccess.Before(threshold) && f.file != nil
-		f.mu.RUnlock()
-
-		if shouldClose {
+		lastAccess := f.lastAccess.Load()
+		if lastAccess > 0 && lastAccess < threshold {
 			_ = f.closeFD()
 		}
 		return true // Continue iteration
@@ -147,7 +166,7 @@ func (m *Manager) closeIdleFiles() {
 
 // CreateReader creates a unified File with download capabilities
 func (m *Manager) CreateReader(info *manager.FileInfo) (*File, error) {
-	key := sanitizeForPath(filepath.Join(info.Parent(), info.Name()))
+	key := BuildCacheKey(info.Parent(), info.Name())
 
 	// Check if already exists
 	if f, ok := m.files.Load(key); ok {
@@ -193,20 +212,23 @@ func (m *Manager) Close() error {
 	return nil
 }
 
-func (m *Manager) CloseFile(filePath string) error {
-	if f, ok := m.files.LoadAndDelete(filePath); ok {
+func (m *Manager) CloseFile(cacheKey string) error {
+	if f, ok := m.files.LoadAndDelete(cacheKey); ok {
 		m.stats.TrackOpenFiles(-1)
 		return f.Close()
 	}
 	return nil
 }
 
-func (m *Manager) RemoveFile(filePath string) error {
-	if f, ok := m.files.LoadAndDelete(filePath); ok {
+func (m *Manager) RemoveFile(cacheKey string) error {
+	if f, ok := m.files.LoadAndDelete(cacheKey); ok {
 		m.stats.TrackOpenFiles(-1)
 		if err := f.removeFromDisk(); err != nil {
 			return err
 		}
+	}
+	if cacheKey != "" {
+		_ = m.deleteMetadata(cacheKey)
 	}
 	return nil
 }
@@ -393,7 +415,15 @@ func (m *Manager) removeFile(cacheKey, diskPath string) error {
 	}
 
 	// Then remove from disk
-	return m.removeFileFromDisk(diskPath)
+	if err := m.removeFileFromDisk(diskPath); err != nil {
+		return err
+	}
+
+	if cacheKey != "" {
+		_ = m.deleteMetadata(cacheKey)
+	}
+
+	return nil
 }
 
 // removeFileFromDisk removes a cached file from disk

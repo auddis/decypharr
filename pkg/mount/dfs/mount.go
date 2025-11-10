@@ -74,7 +74,6 @@ func (m *Mount) Start(ctx context.Context) error {
 	m.forceUnmount()
 
 	mountOpt := fuse.MountOptions{
-		AllowOther:           m.config.AllowOther,
 		FsName:               fmt.Sprintf("dfs-%s", m.name),
 		Debug:                false,
 		Name:                 fmt.Sprintf("dfs-%s", m.name),
