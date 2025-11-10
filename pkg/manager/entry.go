@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/sirrobot01/decypharr/internal/config"
@@ -50,29 +49,6 @@ func (f *FileInfo) ByteRange() *[2]int64 { return f.byteRange }
 // Returns the path based on the new unified mount structure
 func (m *Manager) GetTorrentMountPath(torrent *storage.Torrent) string {
 	return filepath.Join(m.config.Mount.MountPath, torrent.ActiveDebrid, EntryAllFolder, torrent.GetFolder())
-}
-
-func (m *Manager) getAlphabeticalBucket(name string) string {
-	if name == "" {
-		return "UNKNOWN"
-	}
-
-	firstChar := strings.ToUpper(string(name[0]))
-
-	switch {
-	case firstChar >= "A" && firstChar <= "F":
-		return "A-F"
-	case firstChar >= "G" && firstChar <= "M":
-		return "G-M"
-	case firstChar >= "N" && firstChar <= "S":
-		return "N-S"
-	case firstChar >= "T" && firstChar <= "Z":
-		return "T-Z"
-	case firstChar >= "0" && firstChar <= "9":
-		return "0-9"
-	default:
-		return "OTHER"
-	}
 }
 
 func (m *Manager) setMountPaths() {

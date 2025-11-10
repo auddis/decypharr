@@ -80,10 +80,8 @@ type SetupCompleteRequest struct {
 		SkipAuth bool   `json:"skip_auth,omitempty"`
 	} `json:"auth"`
 	Debrid struct {
-		Provider    string `json:"provider"`
-		APIKey      string `json:"api_key"`
-		DownloadKey string `json:"download_key,omitempty"`
-		MountFolder string `json:"mount_folder"`
+		Provider string `json:"provider"`
+		APIKey   string `json:"api_key"`
 	} `json:"debrid"`
 	Download struct {
 		DownloadFolder string `json:"download_folder"`
@@ -132,7 +130,7 @@ func (s *Server) setupCompleteHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Step 2: Handle Debrid Account
-	if req.Debrid.Provider == "" || req.Debrid.APIKey == "" || req.Debrid.MountFolder == "" {
+	if req.Debrid.Provider == "" || req.Debrid.APIKey == "" {
 		s.sendSetupError(w, "Debrid provider, API key, and mount folder are required", nil)
 		return
 	}
@@ -149,17 +147,11 @@ func (s *Server) setupCompleteHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	downloadKey := req.Debrid.DownloadKey
-	if downloadKey == "" {
-		downloadKey = req.Debrid.APIKey
-	}
-
 	debrid := config.Debrid{
 		Provider:         req.Debrid.Provider,
 		Name:             req.Debrid.Provider,
 		APIKey:           req.Debrid.APIKey,
-		DownloadAPIKeys:  []string{downloadKey},
-		Folder:           req.Debrid.MountFolder,
+		DownloadAPIKeys:  []string{req.Debrid.APIKey},
 		DownloadUncached: false,
 		RateLimit:        config.DefaultRateLimit,
 	}
@@ -191,26 +183,10 @@ func (s *Server) setupCompleteHandler(w http.ResponseWriter, r *http.Request) {
 	if cfg.MaxDownloads == 0 {
 		cfg.MaxDownloads = 10
 	}
-
-	// Step 4: Handle Mount System
-	if req.Mount.MountType != "dfs" && req.Mount.MountType != "rclone" {
-		s.sendSetupError(w, "Invalid mount system. Choose 'dfs' or 'rclone'", nil)
-		return
-	}
-
-	if req.Mount.MountPath == "" {
-		s.sendSetupError(w, "Mount path is required", nil)
-		return
-	}
-
-	if req.Mount.CacheDir == "" {
-		s.sendSetupError(w, "Cache directory is required", nil)
-		return
-	}
+	cfg.Mount.Type = config.MountType(req.Mount.MountType)
 
 	if req.Mount.MountType == "dfs" {
 		// Configure DFS
-		cfg.Mount.Type = config.MountTypeDFS
 		cfg.Mount.MountPath = req.Mount.MountPath
 
 		// Create cache dir
@@ -240,7 +216,6 @@ func (s *Server) setupCompleteHandler(w http.ResponseWriter, r *http.Request) {
 
 	} else if req.Mount.MountType == "rclone" {
 		// Configure Rclone
-		cfg.Mount.Type = config.MountTypeRclone
 		cfg.Mount.MountPath = req.Mount.MountPath
 
 		if req.Mount.CacheDir != "" {

@@ -280,6 +280,7 @@ func (f *File) streamingReadAt(ctx context.Context, p []byte, offset int64) (int
 	// Create streaming reader
 	endOffset := offset + readSize - 1
 	sr := NewStreamingReader(ctx, f.manager, f.info, offset, endOffset, f)
+	defer sr.Close() // Ensure cleanup even if we return early
 
 	// Read all data from stream
 	totalRead := 0
@@ -288,7 +289,6 @@ func (f *File) streamingReadAt(ctx context.Context, p []byte, offset int64) (int
 		totalRead += n
 
 		if err != nil {
-			sr.Close()
 			if errors.Is(err, io.EOF) && totalRead > 0 {
 				return totalRead, nil
 			}
@@ -301,6 +301,5 @@ func (f *File) streamingReadAt(ctx context.Context, p []byte, offset int64) (int
 		}
 	}
 
-	sr.Close()
 	return totalRead, nil
 }

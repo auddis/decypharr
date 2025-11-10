@@ -49,9 +49,8 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 
 	stats := map[string]any{
 		// Memory stats
-		"heap_alloc_mb":  fmt.Sprintf("%.2fMB", float64(memStats.HeapAlloc)/1024/1024),
-		"total_alloc_mb": fmt.Sprintf("%.2fMB", float64(memStats.TotalAlloc)/1024/1024),
-		"memory_used":    fmt.Sprintf("%.2fMB", float64(memStats.Sys)/1024/1024),
+		"heap_alloc_mb": fmt.Sprintf("%.2fMB", float64(memStats.Sys)/1024/1024),
+		"memory_used":   fmt.Sprintf("%.2fMB", float64(memStats.HeapAlloc)/1024/1024),
 
 		// GC stats
 		"gc_cycles": memStats.NumGC,

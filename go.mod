@@ -12,7 +12,6 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/sessions v1.4.0
 	github.com/hanwen/go-fuse/v2 v2.8.0
-	github.com/iceber/iouring-go v0.0.0-20230403020409-002cfd2e2a90
 	github.com/imroc/req/v3 v3.55.0
 	github.com/puzpuzpuz/xsync/v4 v4.1.0
 	github.com/robfig/cron/v3 v3.0.1
@@ -52,7 +51,7 @@ require (
 	github.com/vmihailenco/tagparser/v2 v2.0.0 // indirect
 	go.uber.org/mock v0.5.2 // indirect
 	golang.org/x/mod v0.25.0 // indirect
-	golang.org/x/sys v0.34.0 // indirect
+	golang.org/x/sys v0.38.0 // indirect
 	golang.org/x/text v0.26.0 // indirect
 	golang.org/x/tools v0.34.0 // indirect
 )

@@ -65,6 +65,6 @@ func (e *EntryCache) refreshEntry(name string) EntryCacheItem {
 func (e *EntryCache) Refresh() {
 	items := e.manager.GetEntries()
 	for _, item := range items {
-		e.refreshEntry(item.name)
+		e.refreshEntry(item.Name())
 	}
 }

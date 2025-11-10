@@ -86,7 +86,19 @@ func Start(ctx context.Context) error {
 			qb.Reset()
 			// Stop manager to reset ready channel and cleanup resources
 			if err := mgr.Reset(); err != nil {
-				_log.Warn().Err(err).Msg("Failed to stop manager during reset")
+				_log.Warn().Err(err).Msg("Failed to reset manager")
+			}
+			// refresh GC
+			runtime.GC()
+		}
+
+		shutdownFunc := func() {
+			config.Reset()
+			// Reset the store and services
+			qb.Reset()
+			// Stop manager to cleanup all resources including mounts
+			if err := mgr.Stop(); err != nil {
+				_log.Warn().Err(err).Msg("Failed to stop manager during shutdown")
 			}
 			// refresh GC
 			runtime.GC()
@@ -107,7 +119,7 @@ func Start(ctx context.Context) error {
 			cancelSvc() // propagate to services
 			<-done      // wait for them to finish
 			_log.Info().Msg("Decypharr has been stopped gracefully.")
-			resetFunc() // resetFunc store and services
+			shutdownFunc() // cleanup all resources including mounts
 			return nil
 
 		case <-restartCh:
@@ -115,7 +127,7 @@ func Start(ctx context.Context) error {
 			_log.Info().Msg("Restarting Decypharr...")
 			<-done // wait for them to finish
 			_log.Info().Msg("Decypharr has been restarted.")
-			resetFunc() // resetFunc store and services
+			resetFunc() // reset store and services for restart
 			// rebuild svcCtx off the original parent
 			svcCtx, cancelSvc = context.WithCancel(ctx)
 		}

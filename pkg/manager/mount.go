@@ -31,6 +31,7 @@ func (m *Manager) SetEventHandlers(e *Event) {
 func (m *Manager) RefreshEntries(refreshMount bool) {
 	// Refresh entries
 	m.entry.Refresh()
+
 	// Refresh mount if needed
 	if refreshMount {
 		go func() {

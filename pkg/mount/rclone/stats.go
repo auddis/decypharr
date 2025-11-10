@@ -42,6 +42,18 @@ func (m *Manager) Stats() map[string]interface{} {
 		stats.Bandwidth = *bwStats
 	}
 
+	// Add mount infos
+	m.mu.RLock()
+	mountInfos := make(map[string]*MountInfo)
+	for name, mount := range m.mounts {
+		info := mount.getMountInfo()
+		if info != nil {
+			mountInfos[name] = info
+		}
+	}
+	m.mu.RUnlock()
+	stats.Mounts = mountInfos
+
 	// Get version info
 	versionResp, err := m.client.GetVersion()
 	if err == nil {

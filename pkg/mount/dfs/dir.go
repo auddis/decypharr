@@ -150,7 +150,6 @@ func (d *Dir) loadSingleFile(ctx context.Context, name string, out *fuse.EntryOu
 	// Get torrent from source
 	info, err := d.manager.GetTorrentFile(d.name, name)
 	if err != nil {
-		d.logger.Error().Err(err).Str("torrent", d.name).Str("file", name).Msg("Failed to get file info from source")
 		return nil, syscall.EIO
 	}
 	d.addFile(info)
@@ -243,7 +242,6 @@ func (d *Dir) RmDir(ctx context.Context, name string) syscall.Errno {
 		// Remove torrent from source
 		info, err := d.manager.GetTorrentEntry(torrentDir.name)
 		if err != nil {
-			d.logger.Error().Err(err).Str("torrent", torrentDir.name).Msg("Failed to get torrent info from source")
 			return syscall.EIO
 		}
 		if err := d.manager.RemoveEntry(info); err != nil {

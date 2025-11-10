@@ -61,8 +61,6 @@ class SetupWizard {
             const debrid = config.debrids[0];
             document.getElementById('debrid-provider').value = debrid.provider || '';
             document.getElementById('debrid-api-key').value = debrid.api_key || '';
-            document.getElementById('debrid-download-key').value = debrid.download_api_keys?.[0] || '';
-            document.getElementById('debrid-mount-folder').value = debrid.folder || '';
         }
 
         // Populate download folder
@@ -222,8 +220,6 @@ class SetupWizard {
     handleDebridNext() {
         const provider = document.getElementById('debrid-provider').value;
         const apiKey = document.getElementById('debrid-api-key').value.trim();
-        const downloadKey = document.getElementById('debrid-download-key').value.trim();
-        const mountFolder = document.getElementById('debrid-mount-folder').value.trim();
 
         if (!provider) {
             this.showError('Please select a debrid provider');
@@ -233,16 +229,10 @@ class SetupWizard {
             this.showError('API key is required');
             return;
         }
-        if (!mountFolder) {
-            this.showError('Mount folder is required');
-            return;
-        }
 
         this.setupState.step2 = {
             provider: provider,
             api_key: apiKey,
-            download_key: downloadKey || apiKey,
-            mount_folder: mountFolder,
         };
 
         this.goToStep(3);
@@ -282,12 +272,8 @@ class SetupWizard {
         const cacheDir = document.getElementById('cache-dir').value.trim();
         const rcloneBufferSize = document.getElementById('rclone-buffer-size').value.trim();
 
-        if (!mountPath) {
+        if (!mountPath && mountType !== 'none') {
             this.showError('Mount path is required');
-            return;
-        }
-        if (!cacheDir) {
-            this.showError('Cache directory is required');
             return;
         }
 
@@ -318,7 +304,6 @@ class SetupWizard {
         if (this.setupState.step2 && this.setupState.step2.provider) {
             debridOverview.innerHTML = `
                 <p><strong>Provider:</strong> ${this.setupState.step2.provider}</p>
-                <p><strong>Mount Folder:</strong> ${this.setupState.step2.mount_folder}</p>
             `;
         } else {
             debridOverview.textContent = 'Not configured';
@@ -329,11 +314,13 @@ class SetupWizard {
 
         const mountOverview = document.getElementById('overview-mount');
         if (this.setupState.step4 && this.setupState.step4.mount_type) {
-            let mountType = 'DFS (Decypharr File System)';
+            let mountType = 'None';
             if (this.setupState.step4.mount_type === 'rclone') {
                 mountType = 'Rclone';
             } else if (this.setupState.step4.mount_type === 'external_rclone') {
                 mountType = 'External Rclone';
+            } else if (this.setupState.step4.mount_type === 'dfs') {
+                mountType = 'DFS (Decypharr File System)';
             }
             mountOverview.innerHTML = `
                 <p><strong>Type:</strong> ${mountType}</p>

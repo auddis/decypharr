@@ -241,16 +241,13 @@ func (t *Torrent) RemovePlacement(debridName string, cleanup func(placement *Pla
 }
 
 // HasPlacement checks if torrent exists on a debrid
-func (t *Torrent) HasPlacement(debridName string) bool {
+func (t *Torrent) HasPlacement(debridName, infohash string) bool {
 	if t.Placements == nil {
 		return false
 	}
-	for _, placement := range t.Placements {
-		if placement.Debrid == debridName {
-			return true
-		}
-	}
-	return false
+	key := GetPlacementKey(debridName, infohash)
+	_, exists := t.Placements[key]
+	return exists
 }
 
 // SwitchToNextPlacement switches to the next completed placement if available
@@ -345,7 +342,7 @@ func (t *Torrent) IsValid() bool {
 		return false
 	}
 	// Check if there is at least one placement
-	if t.Placements == nil || len(t.Placements) == 0 {
+	if len(t.Placements) == 0 {
 		return false
 	}
 	activePlacement := t.GetActivePlacement(t.InfoHash)
@@ -541,7 +538,7 @@ func GetTorrentFolder(folderNaming config.WebDavFolderNaming, torrent *Torrent) 
 	return folder
 }
 
-// MergeTorrents merges two torrents with the same folder name.
+// mergeTorrentsFiles merges two torrents with the same folder name.
 // The existing torrent is updated with placements and files from the new torrent.
 // Files are merged by name, with preference given based on size and timestamp.
 //
@@ -556,7 +553,7 @@ func GetTorrentFolder(folderNaming config.WebDavFolderNaming, torrent *Torrent) 
 //  1. Placements: All placements from both torrents are preserved with keys "{debrid}:{infohash}"
 //  2. Files: For duplicate filenames, keep the larger or newer file
 //  3. Metadata: Use the earlier AddedOn time, preserve both infohashes via File.InfoHash
-func MergeTorrents(existing, new *Torrent) *Torrent {
+func mergeTorrentsFiles(existing, new *Torrent) *Torrent {
 	// Mark as having duplicates
 	existing.HasDuplicates = true
 

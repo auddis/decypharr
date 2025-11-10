@@ -62,6 +62,9 @@ func (m *Manager) AddNewTorrent(ctx context.Context, importReq *ImportRequest) e
 			client := m.DebridClient(placement.Debrid)
 			if client != nil {
 				debridTorrent, err = client.GetTorrent(placement.ID)
+				if err != nil {
+					debridTorrent = nil
+				}
 			}
 		}
 	}

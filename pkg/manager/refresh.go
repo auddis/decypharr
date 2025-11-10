@@ -8,7 +8,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/puzpuzpuz/xsync/v4"
 	"github.com/sirrobot01/decypharr/internal/utils"
 	debrid "github.com/sirrobot01/decypharr/pkg/debrid/common"
 	"github.com/sirrobot01/decypharr/pkg/debrid/types"
@@ -22,6 +21,7 @@ func (m *Manager) refreshTorrents(ctx context.Context, debridName string, debrid
 		return
 	default:
 	}
+
 	defer func() {
 		runtime.GC()
 		debug.FreeOSMemory()
@@ -32,132 +32,199 @@ func (m *Manager) refreshTorrents(ctx context.Context, debridName string, debrid
 		m.logger.Debug().Str("debrid", debridName).Msg("Starting torrent refresh")
 
 		// Fetch torrents from this debrid client
-		timer := time.Now()
 		torrents, err := debridClient.GetTorrents()
 		if err != nil {
 			m.logger.Error().Err(err).Str("debrid", debridName).Msg("Failed to get torrents")
 			return nil, err
 		}
-		m.logger.Debug().
-			Str("debrid", debridName).
-			Int("count", len(torrents)).
-			Msgf("Found %d torrents. Took %s", len(torrents), time.Since(timer))
 
 		if len(torrents) == 0 {
 			m.logger.Debug().Str("debrid", debridName).Msg("No torrents found")
 			return nil, nil
 		}
-		// Get all cached torrents
-		cachedTorrents, err := m.storage.List(nil)
+
+		m.logger.Debug().Str("debrid", debridName).Msgf("Found %d torrents from debrid", len(torrents))
+
+		// Build map of current torrents by infohash
+		currentByInfoHash := make(map[string]*types.Torrent, len(torrents))
+		for i := range torrents {
+			t := torrents[i]
+			if _, exists := currentByInfoHash[t.InfoHash]; exists {
+				continue
+			}
+			currentByInfoHash[t.InfoHash] = t
+		}
+
+		// Clear the torrents slice to free memory (we only need the map now)
+		torrents = nil
+
+		// Stream through cached torrents to detect changes
+		newTorrents := make([]*types.Torrent, 0, 100)
+		torrentsToUpdate := make([]*storage.Torrent, 0, 100)
+		torrentsToDelete := make([]string, 0, 10)
+
+		// Build a lightweight set of cached infohashes during streaming (memory efficient)
+		cachedInfoHashes := make(map[string]bool, len(currentByInfoHash))
+
+		batchSize := 500
+		err = m.storage.ForEachBatch(batchSize, func(batch []*storage.Torrent) error {
+			for _, cached := range batch {
+				// Mark as cached
+				cachedInfoHashes[cached.InfoHash] = true
+
+				currentTorrent, existsOnDebrid := currentByInfoHash[cached.InfoHash]
+				hasPlacementOnDebrid := cached.HasPlacement(debridName, cached.InfoHash)
+
+				if hasPlacementOnDebrid {
+					// Cached torrent has a placement on this debrid
+					if !existsOnDebrid {
+						cached.RemovePlacement(debridName, nil)
+
+						if len(cached.Placements) == 0 {
+							// No placements left - delete entire torrent
+							torrentsToDelete = append(torrentsToDelete, cached.InfoHash)
+						} else {
+							// Still has other placements - update
+							torrentsToUpdate = append(torrentsToUpdate, cached)
+						}
+					}
+				} else if existsOnDebrid {
+					// Cached torrent doesn't have placement on this debrid, but torrent exists on debrid
+					// This is a new placement to add
+					newTorrents = append(newTorrents, currentTorrent)
+				}
+			}
+			return nil
+		})
+
 		if err != nil {
-			m.logger.Error().Err(err).Msg("Failed to list cached torrents")
+			m.logger.Error().Err(err).Msg("Failed to stream cached torrents")
 			return nil, err
 		}
 
-		// Build map of cached torrents by infohash
-		cachedMap := xsync.NewMap[string, *storage.Torrent]()
-		for _, t := range cachedTorrents {
-			cachedMap.Store(t.InfoHash, t)
-		}
-
-		// Build map of current debrid torrents by ID
-		currentTorrentIds := make(map[string]string) // debrid_id -> infohash
-		for _, t := range torrents {
-			currentTorrentIds[t.Id] = t.InfoHash
-		}
-
-		// Check for deleted placements on this debrid
-		deletedPlacements := make([]struct{ infohash, debridName string }, 0)
-		cachedMap.Range(func(key string, cached *storage.Torrent) bool {
-			// Find placement(s) for this debrid
-			for _, placement := range cached.Placements {
-				if placement.Debrid == debridName {
-					// Check if this placement still exists on the debrid
-					if _, exists := currentTorrentIds[placement.ID]; !exists {
-						deletedPlacements = append(deletedPlacements, struct{ infohash, debridName string }{cached.InfoHash, debridName})
-					}
-					break // Only need to check one placement per debrid
-				}
-			}
-			return true
-		})
-
-		// Handle deleted placements
-		if len(deletedPlacements) > 0 {
-			for _, dp := range deletedPlacements {
-				if torrent, ok := cachedMap.Load(dp.infohash); ok {
-					torrent.RemovePlacement(dp.debridName, nil)
-
-					// If no placements left, delete the entire torrent
-					if len(torrent.Placements) == 0 {
-						if err := m.storage.Delete(dp.infohash); err != nil {
-							m.logger.Error().Err(err).Str("infohash", dp.infohash).Msg("Failed to delete torrent")
-						}
-						cachedMap.Delete(dp.infohash)
-					} else {
-						// Update the torrent with removed placement
-						if err := m.AddOrUpdate(torrent, nil); err != nil {
-							m.logger.Error().Err(err).Str("infohash", dp.infohash).Msg("Failed to update torrent")
-						}
-					}
-				}
-			}
-		}
-
-		// Find new torrents or new placements
-		newTorrents := make([]*types.Torrent, 0)
-		for _, t := range torrents {
-			cached, exists := cachedMap.Load(t.InfoHash)
-
-			if !exists {
-				// Brand new torrent
+		// Check for brand new torrents (not in cache at all)
+		for infohash, t := range currentByInfoHash {
+			if !cachedInfoHashes[infohash] {
 				newTorrents = append(newTorrents, t)
-			} else if !cached.HasPlacement(debridName) {
-				// Existing torrent but new placement on this debrid
-				newTorrents = append(newTorrents, t)
-			} else {
-				// Update existing placement progress/status
-				// Find placement for this debrid and infohash
-				placementKey := storage.GetPlacementKey(debridName, t.InfoHash)
-				placement := cached.Placements[placementKey]
-				if placement != nil && placement.ID == t.Id {
-					placement.Status = t.Status
-					placement.Progress = t.Progress
-					_ = m.AddOrUpdate(cached, nil)
-				}
 			}
 		}
 
-		// Process new torrents/placements
+		// Clear the large map immediately after use to free memory
+		for k := range currentByInfoHash {
+			delete(currentByInfoHash, k)
+		}
+		currentByInfoHash = nil
+
+		for k := range cachedInfoHashes {
+			delete(cachedInfoHashes, k)
+		}
+		cachedInfoHashes = nil
+
+		// Handle deletions
+		if len(torrentsToDelete) > 0 {
+			m.logger.Debug().Str("debrid", debridName).Msgf("Deleting %d torrents with no remaining placements", len(torrentsToDelete))
+			for _, infohash := range torrentsToDelete {
+				if err := m.storage.Delete(infohash); err != nil {
+					m.logger.Error().Err(err).Str("infohash", infohash).Msg("Failed to delete torrent")
+				}
+			}
+		}
+		// Clear deletion slice
+		torrentsToDelete = nil
+
+		// Batch update torrents with changed placements
+		if len(torrentsToUpdate) > 0 {
+			m.logger.Debug().Str("debrid", debridName).Msgf("Updating %d torrents", len(torrentsToUpdate))
+			if err := m.storage.BatchAddOrUpdate(torrentsToUpdate); err != nil {
+				m.logger.Error().Err(err).Msg("Failed to batch update torrents")
+			}
+		}
+		// Clear update slice
+		torrentsToUpdate = nil
+
+		// Process new torrents/placements with batching
 		if len(newTorrents) > 0 {
 			m.logger.Trace().Str("debrid", debridName).Msgf("Found %d new torrents/placements", len(newTorrents))
 
 			workChan := make(chan *types.Torrent, min(100, len(newTorrents)))
+			batchChan := make(chan *storage.Torrent, 50)
 			var processWg sync.WaitGroup
+			var batchWg sync.WaitGroup
 			var processed int64
 
+			// Batch writer
+			batchWg.Add(1)
+			go func() {
+				defer batchWg.Done()
+				batch := make([]*storage.Torrent, 0, 50)
+				ticker := time.NewTicker(3 * time.Second)
+				defer ticker.Stop()
+
+				flushBatch := func() {
+					if len(batch) > 0 {
+						if err := m.storage.BatchAddOrUpdate(batch); err != nil {
+							m.logger.Error().Err(err).Msg("Failed to batch write torrents")
+						}
+						// Clear slice and nil out references to help GC
+						for i := range batch {
+							batch[i] = nil
+						}
+						batch = batch[:0]
+					}
+				}
+
+				for {
+					select {
+					case t, ok := <-batchChan:
+						if !ok {
+							flushBatch()
+							return
+						}
+						batch = append(batch, t)
+						if len(batch) >= 50 {
+							flushBatch()
+						}
+					case <-ticker.C:
+						flushBatch()
+					}
+				}
+			}()
+
+			// Workers
 			workers := 10
 			for i := 0; i < workers; i++ {
 				processWg.Add(1)
 				go func() {
 					defer processWg.Done()
 					for t := range workChan {
-						if err := m.processSyncTorrent(t, cachedMap); err != nil {
+						if mt, err := m.processSyncTorrent(t); err != nil {
 							m.logger.Error().Err(err).Str("debrid", debridName).Msgf("Failed to process torrent %s", t.Id)
+						} else if mt != nil {
+							batchChan <- mt
 						}
 						atomic.AddInt64(&processed, 1)
 					}
 				}()
 			}
 
-			for _, t := range newTorrents {
+			// Send torrents to workers and clear references immediately
+			for i, t := range newTorrents {
 				workChan <- t
+				newTorrents[i] = nil // Clear reference as soon as it's sent
 			}
+			// Clear the slice itself
+			newTorrents = nil
+
 			close(workChan)
 			processWg.Wait()
+			close(batchChan)
+			batchWg.Wait()
 
 			m.logger.Debug().Str("debrid", debridName).Msgf("Processed %d new torrents/placements", processed)
 		}
+
+		// Force garbage collection to reclaim memory
+		runtime.GC()
 
 		return nil, nil
 	})
@@ -167,21 +234,21 @@ func (m *Manager) refreshTorrents(ctx context.Context, debridName string, debrid
 	}
 
 	// Refresh entries
-	m.RefreshEntries(false)
+	m.RefreshEntries(true)
 }
 
-// processSyncTorrent processes a single torrent during refresh
-func (m *Manager) processSyncTorrent(t *types.Torrent, cachedMap *xsync.Map[string, *storage.Torrent]) error {
+// processSyncTorrent processes a single torrent and returns it for batched writing
+func (m *Manager) processSyncTorrent(t *types.Torrent) (*storage.Torrent, error) {
 	// Get the debrid client
 	client := m.DebridClient(t.Debrid)
 	if client == nil {
-		return nil
+		return nil, nil
 	}
 
 	// Check if files are complete
 	if len(t.Files) == 0 || !isComplete(t.Files) {
 		if err := client.UpdateTorrent(t); err != nil {
-			return err
+			return nil, err
 		}
 	}
 
@@ -190,7 +257,7 @@ func (m *Manager) processSyncTorrent(t *types.Torrent, cachedMap *xsync.Map[stri
 			Str("torrent_id", t.Id).
 			Str("torrent_name", t.Name).
 			Msg("Torrent still not complete after refresh")
-		return nil
+		return nil, nil
 	}
 
 	// Parse added timestamp
@@ -200,15 +267,12 @@ func (m *Manager) processSyncTorrent(t *types.Torrent, cachedMap *xsync.Map[stri
 	}
 
 	// Check if we have an existing managed torrent
-	mt, exists := cachedMap.Load(t.InfoHash)
-	if !exists {
+	mt, err := m.storage.Get(t.InfoHash)
+	if err != nil {
 		// Create new managed torrent
 		var magnet *utils.Magnet
 		if t.Magnet == nil || t.Magnet.Link == "" {
 			magnet = utils.ConstructMagnet(t.InfoHash, t.Name)
-			if err != nil {
-				return err
-			}
 		} else {
 			magnet = t.Magnet
 		}
@@ -237,7 +301,6 @@ func (m *Manager) processSyncTorrent(t *types.Torrent, cachedMap *xsync.Map[stri
 			UpdatedAt:        time.Now(),
 		}
 		mt.Folder = mt.GetFolder()
-		cachedMap.Store(mt.InfoHash, mt)
 	}
 
 	// Populate global Files metadata (only if empty)
@@ -279,8 +342,7 @@ func (m *Manager) processSyncTorrent(t *types.Torrent, cachedMap *xsync.Map[stri
 		}
 	}
 
-	// Save to storage
-	return m.AddOrUpdate(mt, nil)
+	return mt, nil
 }
 
 // refreshTorrent refreshes a single torrent from its active debrid

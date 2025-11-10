@@ -83,9 +83,6 @@ func (m *Mount) Start(ctx context.Context) error {
 	}
 
 	var opt []string
-	if m.config.AllowRoot {
-		opt = append(opt, "allow_root")
-	}
 	if m.config.AllowOther {
 		opt = append(opt, "allow_other")
 	}

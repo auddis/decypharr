@@ -91,8 +91,6 @@ type Manager struct {
 	cachedDirSize atomic.Int64
 	lastSizeCheck atomic.Int64 // Unix timestamp
 
-	// Lightning streaming integration
-	lightning *LightningIntegration
 }
 
 // NewManager creates a file manager
@@ -110,12 +108,6 @@ func NewManager(manager *manager.Manager, fuseConfig *config.FuseConfig) *Manage
 		stats:             statsTracker,
 		fileAccessTracker: xsync.NewMap[string, *FileAccessInfo](),
 	}
-
-	// Initialize Lightning integration
-	if lightning, err := NewLightningIntegration(manager, fuseConfig); err == nil {
-		m.lightning = lightning
-	}
-	// If Lightning fails to initialize, m.lightning will be nil and we'll fall back to traditional method
 
 	go m.closeIdleFilesLoop()
 	go m.Cleanup(ctx)
@@ -192,11 +184,6 @@ func (m *Manager) CreateReader(info *manager.FileInfo) (*File, error) {
 func (m *Manager) Close() error {
 	m.closeCancel()
 
-	// Close Lightning integration
-	if m.lightning != nil {
-		_ = m.lightning.Close()
-	}
-
 	// Close all files
 	m.files.Range(func(key string, f *File) bool {
 		_ = f.Close()
@@ -237,42 +224,6 @@ func (m *Manager) Cleanup(ctx context.Context) {
 			return
 		}
 	}
-}
-
-// syncAllMetadata saves metadata for all dirty files
-// BUT: Only syncs files that haven't been accessed recently (not actively playing)
-func (m *Manager) syncAllMetadata() {
-	now := time.Now()
-
-	// Iterate through all cached files
-	m.files.Range(func(key string, f *File) bool {
-		// Only sync if dirty AND not recently accessed
-		// If file was accessed in last 10 seconds, skip (likely active playback)
-		f.mu.RLock()
-		isDirty := f.dirty
-		recentlyAccessed := now.Sub(f.lastAccess) < 10*time.Second
-		hasRanges := f.ranges != nil
-		f.mu.RUnlock()
-
-		if !isDirty || !hasRanges || recentlyAccessed {
-			return true // Skip files that are clean, empty, or actively playing
-		}
-
-		// Sync in background to avoid blocking
-		go func(file *File) {
-			file.mu.Lock()
-			defer file.mu.Unlock()
-			if file.dirty && file.ranges != nil {
-				metadata, err := file.getMetadata()
-				if err == nil {
-					_ = m.saveMetadata(file.info.Parent(), file.info.Name(), metadata)
-				}
-				file.dirty = false
-			}
-		}(f)
-
-		return true // Continue iteration
-	})
 }
 
 func (m *Manager) cleanup() {
@@ -489,21 +440,68 @@ func (m *Manager) GetStats() map[string]interface{} {
 		"buffer_size":     m.config.BufferSize,
 	}
 
-	// Add Lightning stats if enabled
-	if m.lightning != nil {
-		stats["lightning"] = m.lightning.GetStats()
+	// Aggregate memory buffer stats from all files
+	var totalMemHits, totalMemMisses, totalEvictions, totalFlushes, totalFlushBytes int64
+	var totalMemoryUsed, totalMemoryLimit int64
+	var totalChunksCount int64
+	fileCount := 0
+
+	m.files.Range(func(key string, f *File) bool {
+		if f.memBuffer != nil {
+			memStats := f.memBuffer.GetStats()
+			fileCount++
+
+			if hits, ok := memStats["hits"].(int64); ok {
+				totalMemHits += hits
+			}
+			if misses, ok := memStats["misses"].(int64); ok {
+				totalMemMisses += misses
+			}
+			if evictions, ok := memStats["evictions"].(int64); ok {
+				totalEvictions += evictions
+			}
+			if flushes, ok := memStats["flushes"].(int64); ok {
+				totalFlushes += flushes
+			}
+			if flushBytes, ok := memStats["flush_bytes"].(int64); ok {
+				totalFlushBytes += flushBytes
+			}
+			if memUsed, ok := memStats["memory_used"].(int64); ok {
+				totalMemoryUsed += memUsed
+			}
+			if memLimit, ok := memStats["memory_limit"].(int64); ok {
+				totalMemoryLimit += memLimit
+			}
+			if chunksCount, ok := memStats["chunks_count"].(int); ok {
+				totalChunksCount += int64(chunksCount)
+			}
+		}
+		return true
+	})
+
+	// Add memory buffer stats if we have any files with buffers
+	if fileCount > 0 {
+		hitRate := 0.0
+		total := totalMemHits + totalMemMisses
+		if total > 0 {
+			hitRate = float64(totalMemHits) / float64(total) * 100.0
+		}
+
+		stats["memory_buffer"] = map[string]interface{}{
+			"hits":         totalMemHits,
+			"misses":       totalMemMisses,
+			"hit_rate_pct": hitRate,
+			"evictions":    totalEvictions,
+			"flushes":      totalFlushes,
+			"flush_bytes":  totalFlushBytes,
+			"memory_used":  totalMemoryUsed,
+			"memory_limit": totalMemoryLimit,
+			"chunks_count": totalChunksCount,
+			"files_count":  fileCount,
+		}
 	}
 
 	return stats
-}
-
-// TryLightningRead attempts to use Lightning for reading, returns (n, usedLightning, error)
-func (m *Manager) TryLightningRead(ctx context.Context, fileInfo *manager.FileInfo, p []byte, offset int64) (int, bool, error) {
-	if m.lightning == nil || !m.lightning.IsEnabled() {
-		return 0, false, nil
-	}
-
-	return m.lightning.ReadAt(ctx, fileInfo, p, offset)
 }
 
 // === Utility Functions ===

@@ -115,7 +115,7 @@ func isRetryableError(err error) bool {
 	var netErr net.Error
 	if errors.As(err, &netErr) {
 		// Retry on timeout errors and temporary errors
-		return netErr.Timeout() || netErr.Temporary()
+		return netErr.Timeout()
 	}
 
 	// Not a retryable error

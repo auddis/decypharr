@@ -278,17 +278,27 @@ class ConfigManager {
                         <i class="bi bi-trash"></i>
                     </button>
                 </div>
-                <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
                         <div>
                             <label class="label" for="debrid[${index}].name">
                                 <span class=" font-medium">Service Type</span>
                             </label>
-                            <select class="select w-full" name="debrid[${index}].name" id="debrid[${index}].name" required>
+                            <select class="select w-full" name="debrid[${index}].provider" id="debrid[${index}].provider" required>
                                 <option value="realdebrid">Real Debrid</option>
                                 <option value="alldebrid">AllDebrid</option>
                                 <option value="debridlink">Debrid Link</option>
                                 <option value="torbox">Torbox</option>
                             </select>
+                        </div>
+                        
+                        <div>
+                            <label class="label" for="debrid[${index}].name">
+                                <span class=" font-medium">Name</span>
+                            </label>
+                            <input type="text" class="input w-full" 
+                                   name="debrid[${index}].name" id="debrid[${index}].name" 
+                                   placeholder="realdebrid">
+                            <span class="text-sm opacity-70">A unique name for this debrid account</span>
                         </div>
 
                         <div>
@@ -887,7 +897,7 @@ class ConfigManager {
 
         // Validate debrid services
         config.debrids.forEach((debrid, index) => {
-            if (!debrid.name || !debrid.api_key ) {
+            if (!debrid.name || !debrid.api_key || !debrid.provider) {
                 errors.push(`Debrid service #${index + 1}: Name, API key are required`);
             }
         });
@@ -974,11 +984,10 @@ class ConfigManager {
         const debrids = [];
 
         for (let i = 0; i < this.debridCount; i++) {
-            const nameEl = document.querySelector(`[name="debrid[${i}].name"]`);
-            if (!nameEl || !nameEl.closest('.debrid-config')) continue;
 
             const debrid = {
-                name: nameEl.value,
+                name: document.querySelector(`[name="debrid[${i}].name"]`).value,
+                provider: document.querySelector(`[name="debrid[${i}].provider"]`).value,
                 api_key: document.querySelector(`[name="debrid[${i}].api_key"]`).value,
                 rate_limit: document.querySelector(`[name="debrid[${i}].rate_limit"]`).value,
                 minimum_free_slot: parseInt(document.querySelector(`[name="debrid[${i}].minimum_free_slot"]`).value) || 0,
@@ -1000,7 +1009,7 @@ class ConfigManager {
             debrid.download_links_refresh_interval = document.querySelector(`[name="debrid[${i}].download_links_refresh_interval"]`).value;
             debrid.auto_expire_links_after = document.querySelector(`[name="debrid[${i}].auto_expire_links_after"]`).value;
 
-            if (debrid.name && debrid.api_key) {
+            if (debrid.name && debrid.api_key && debrid.provider) {
                 debrids.push(debrid);
             }
         }

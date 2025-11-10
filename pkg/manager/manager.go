@@ -40,7 +40,6 @@ type Manager struct {
 	config *config.Config
 
 	// Processing workers
-	skipPreCache bool
 	scheduler    gocron.Scheduler
 	cetScheduler gocron.Scheduler
 	queue        *Queue
@@ -269,8 +268,10 @@ func (m *Manager) sync(ctx context.Context) error {
 	var wg sync.WaitGroup
 	m.clients.Range(func(name string, client debrid.Client) bool {
 		wg.Add(1)
-		defer wg.Done()
-		m.refreshTorrents(ctx, name, client)
+		go func() {
+			defer wg.Done()
+			m.refreshTorrents(ctx, name, client)
+		}()
 		return true
 	})
 	wg.Wait()
@@ -313,10 +314,17 @@ func (m *Manager) Start(ctx context.Context) error {
 	return nil
 }
 
-// Reset resets the manager with the new configuration
-// This is called after config changes (e.g., setup wizard) to apply new settings
-func (m *Manager) Reset() error {
-	m.logger.Info().Msg("Resetting manager with new configuration")
+// Stop stops the manager and cleans up all resources
+func (m *Manager) Stop() error {
+	m.logger.Info().Msg("Stopping manager")
+
+	// Stop mount manager first
+	if m.mountManager != nil {
+		m.logger.Info().Msg("Stopping mount manager")
+		if err := m.mountManager.Stop(); err != nil {
+			m.logger.Warn().Err(err).Msg("Failed to stop mount manager")
+		}
+	}
 
 	// Stop schedulers
 	if m.scheduler != nil {
@@ -328,6 +336,20 @@ func (m *Manager) Reset() error {
 		if err := m.cetScheduler.Shutdown(); err != nil {
 			m.logger.Warn().Err(err).Msg("Failed to shutdown CET scheduler")
 		}
+	}
+
+	m.logger.Info().Msg("Manager stopped successfully")
+	return nil
+}
+
+// Reset resets the manager with the new configuration
+// This is called after config changes (e.g., setup wizard) to apply new settings
+func (m *Manager) Reset() error {
+	m.logger.Info().Msg("Resetting manager with new configuration")
+
+	// Stop resources before resetting
+	if err := m.Stop(); err != nil {
+		m.logger.Warn().Err(err).Msg("Failed to stop manager during reset")
 	}
 
 	// Reload configuration

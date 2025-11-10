@@ -10,13 +10,6 @@ import (
 	"github.com/sirrobot01/decypharr/internal/config"
 )
 
-// Configuration constants optimized for streaming
-const (
-	DefaultChunkSize       = 8 * 1024 * 1024  // 4MB chunks - good balance for metadata ops
-	DefaultReadAheadSize   = 16 * 1024 * 1024 // 16MB read-ahead buffer for streaming
-	DefaultConcurrentReads = 4
-)
-
 // FuseConfig holds the simplified configuration for the FUSE filesystem
 type FuseConfig struct {
 	MountPath string
@@ -61,15 +54,11 @@ type FuseConfig struct {
 func DefaultFuseConfig() *FuseConfig {
 	return &FuseConfig{
 		// Performance defaults optimized for streaming
-		MaxConcurrentReads:   DefaultConcurrentReads,
-		DaemonTimeout:        time.Second * 10,       // Longer timeout for reliability
-		ChunkSize:            DefaultChunkSize,       // Larger chunks for fewer requests
-		CacheDiskSize:        5 * 1024 * 1024 * 1024, // 5GB disk cache
-		CacheExpiry:          24 * time.Hour,         // Longer cache for popular content
-		CacheCleanupInterval: 5 * time.Minute,        // More frequent cleanup
+		MaxConcurrentReads:   config.DefaultDFSMaxConcurrentRead,
+		DaemonTimeout:        time.Second * 10, // Longer timeout for reliability
+		CacheExpiry:          24 * time.Hour,   // Longer cache for popular content
+		CacheCleanupInterval: 5 * time.Minute,  // More frequent cleanup
 		AsyncRead:            true,
-		ReadAheadSize:        DefaultReadAheadSize,
-		BufferSize:           4 * 1024 * 1024,  // 4MB in-memory buffer for fast access
 		FileIdleTimeout:      10 * time.Minute, // Idle file handle timeout
 
 		// File system defaults

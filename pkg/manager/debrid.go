@@ -112,7 +112,7 @@ func (m *Manager) GetIngestsByDebrid(debridName string) ([]types.IngestData, err
 	}
 	var ingests []types.IngestData
 	for _, torrent := range torrents {
-		if !torrent.HasPlacement(debridName) {
+		if !torrent.HasPlacement(debridName, torrent.InfoHash) {
 			continue
 		}
 		ingests = append(ingests, types.IngestData{

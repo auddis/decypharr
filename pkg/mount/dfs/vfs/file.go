@@ -51,6 +51,9 @@ type File struct {
 	ranges     *ranges.Ranges // Lazy-loaded from metadata
 	rangesOnce sync.Once      // Ensures ranges are loaded exactly once
 
+	// Memory buffer (ultra-fast memory-first caching)
+	memBuffer *MemoryBuffer
+
 	// Download configuration
 	readAhead int64
 
@@ -60,7 +63,7 @@ type File struct {
 	// Stats and lifecycle
 	stats           *StatsTracker
 	manager         *manager.Manager // Reference to save metadata
-	vfsManager      *Manager         // Reference to VFS manager for Lightning access
+	vfsManager      *Manager         // Reference to VFS manager
 	lastAccess      time.Time
 	lastReadOffset  atomic.Int64 // Track last read offset for sequential detection
 	modTime         time.Time
@@ -97,12 +100,23 @@ func newFile(cacheDir string, info *manager.FileInfo, chunkSize, readAhead int64
 		return nil, fmt.Errorf("truncate cache file: %w", err)
 	}
 
+	// Create memory buffer for ultra-fast access
+	// Use context that will be cancelled when file closes
+	bufferCtx := context.Background()
+	memBufferSize := vfsManager.config.BufferSize
+	if memBufferSize <= 0 {
+		memBufferSize = 64 * 1024 * 1024 // Default 64MB if not configured
+	}
+	memBuffer := NewMemoryBuffer(bufferCtx, memBufferSize, chunkSize)
+	memBuffer.AttachFile(file) // Attach for async flushing
+
 	f := &File{
 		path:        cachePath,
 		info:        info,
 		chunkSize:   chunkSize,
 		file:        file,
 		ranges:      nil, // Lazy-loaded via rangesOnce
+		memBuffer:   memBuffer,
 		readAhead:   readAhead,
 		downloading: xsync.NewMap[int64, *downloadJob](),
 		stats:       stats,
@@ -172,23 +186,6 @@ func (f *File) scanExistingData() error {
 	}
 
 	return nil
-}
-
-// saveMetadata persists the current state to disk
-func (f *File) getMetadata() (*Metadata, error) {
-	if f.manager == nil || f.ranges == nil {
-		return nil, nil
-	}
-
-	meta := &Metadata{
-		ModTime:     f.modTime,
-		ATime:       f.lastAccess,
-		Size:        f.info.Size(),
-		Ranges:      f.ranges.GetRanges(),
-		Fingerprint: "", // Could add ETag/hash here
-		Dirty:       f.dirty,
-	}
-	return meta, nil
 }
 
 // readAt reads from cache if data is available, returns false if not cached
@@ -301,6 +298,11 @@ func (f *File) Close() error {
 	// Stop all downloads first
 	_ = f.CloseDownloads()
 
+	// Close memory buffer and flush pending data
+	if f.memBuffer != nil {
+		_ = f.memBuffer.Close()
+	}
+
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -397,10 +399,6 @@ func (f *File) IsCached(offset, length int64) bool {
 	})
 }
 
-// ============================================================================
-// Download Methods (merged from Reader)
-// ============================================================================
-
 // ReadAt reads data with progressive download for instant playback start
 // Uses ring buffer streaming for large sequential reads (instant playback)
 // Falls back to chunk-based caching for random/small reads
@@ -416,24 +414,28 @@ func (f *File) ReadAt(ctx context.Context, p []byte, offset int64) (int, error) 
 		p = p[:readSize]
 	}
 
-	// Try Lightning streaming first (if enabled and configured)
-	if f.vfsManager != nil {
-		n, usedLightning, err := f.vfsManager.TryLightningRead(ctx, f.info, p, offset)
-		if usedLightning {
-			// Lightning successfully handled the read
-			if err == nil {
-				f.lastReadOffset.Store(offset + int64(n))
-			}
-			return n, err
+	// FAST PATH: Check memory buffer first (< 1ms)
+	if f.memBuffer != nil {
+		data, found := f.memBuffer.Get(offset, readSize)
+		if found {
+			// Memory hit! Ultra-fast return
+			n := copy(p, data)
+			f.lastReadOffset.Store(offset + int64(n))
+			// Trigger prefetch in background
+			go f.aggressiveSequentialPrefetch(ctx, offset+readSize)
+			return n, nil
 		}
-		// Lightning not available or failed - fall through to traditional method
 	}
 
-	// Check if fully cached (zero-allocation check)
+	// Check if fully cached on disk (zero-allocation check)
 	if f.IsCached(offset, readSize) {
-		// Cache hit - read and trigger prefetch
+		// Disk cache hit - read and store in memory for next time
 		n, _, err := f.readAt(p, offset)
 		if err == nil {
+			// Store in memory buffer for future fast access
+			if f.memBuffer != nil && n > 0 {
+				_ = f.memBuffer.Put(offset, p[:n])
+			}
 			// Update last read offset for sequential detection
 			f.lastReadOffset.Store(offset + int64(n))
 			go f.aggressiveSequentialPrefetch(ctx, offset+readSize)
@@ -448,11 +450,15 @@ func (f *File) ReadAt(ctx context.Context, p []byte, offset int64) (int, error) 
 
 	// OPTIMIZATION: Use streaming mode for large sequential reads (video playback)
 	// This provides instant playback startup similar to WebDAV ring buffer
-	// Streaming bypasses disk I/O and delivers data directly to client
+	// Streaming delivers data directly to client and caches in memory
 	if shouldUseStreaming(offset, readSize, &f.lastReadOffset) {
 		// Use ring buffer streaming for instant playback
 		n, err := f.streamingReadAt(ctx, p, offset)
 		if err == nil {
+			// Store in memory buffer for future fast access
+			if f.memBuffer != nil && n > 0 {
+				_ = f.memBuffer.Put(offset, p[:n])
+			}
 			// Update last read offset for sequential detection
 			f.lastReadOffset.Store(offset + int64(n))
 		}
@@ -460,57 +466,34 @@ func (f *File) ReadAt(ctx context.Context, p []byte, offset int64) (int, error) 
 	}
 
 	// FALLBACK: Use chunk-based caching for random/small reads
-	// Calculate which chunks we need
-	startChunk := offset / f.chunkSize
-	endChunk := (offset + readSize - 1) / f.chunkSize
-
-	// Progressive download: Calculate minimum threshold for instant playback
-	// Use 512KB as minimum - enough for video player to start, small enough to download fast
-	const minThreshold int64 = 512 * 1024 // 512KB
-
-	// For small reads (< 512KB), just download what's needed
-	threshold := minThreshold
-	if readSize < minThreshold {
-		threshold = readSize
+	// Download directly to memory (FAST PATH)
+	// Network → Memory → Async Disk Flush
+	data, err := f.DownloadToMemory(ctx, offset, readSize)
+	if err != nil {
+		return 0, fmt.Errorf("download to memory: %w", err)
 	}
 
-	// Progressive approach: Download first chunk with early return at threshold
-	// This allows playback to start after ~512KB instead of waiting for full 8MB chunk
-	if err := f.downloadChunkWithThreshold(ctx, startChunk, threshold); err != nil {
-		return 0, err
-	}
-
-	// Start downloading remaining chunks in background (non-blocking)
-	numChunks := endChunk - startChunk + 1
-	if numChunks > 1 {
-		for chunkIdx := startChunk + 1; chunkIdx <= endChunk; chunkIdx++ {
-			chunkIdx := chunkIdx // Capture loop variable
-			go func() {
-				_ = f.downloadChunk(ctx, chunkIdx)
-			}()
+	// Store in memory buffer (this will trigger async disk flush)
+	if f.memBuffer != nil && len(data) > 0 {
+		if err := f.memBuffer.Put(offset, data); err != nil {
+			// Memory buffer full, fall back to disk write
+			_, _ = f.WriteAt(data, offset)
 		}
+	} else {
+		// No memory buffer, write directly to disk
+		_, _ = f.WriteAt(data, offset)
 	}
 
-	// Trigger prefetch for chunks beyond the current request (only once, not in cache hit path)
-	go f.aggressiveSequentialPrefetch(ctx, (endChunk+1)*f.chunkSize)
+	// Copy to output buffer
+	n := copy(p, data)
 
-	// Read from file now - at least 512KB is ready from first chunk
-	// Note: May return partial data if background downloads haven't completed
-	// This is intentional - we return what's available immediately for fast playback start
-	n, _, err := f.readAt(p, offset)
-	if err != nil && err != io.EOF {
-		return n, err
-	}
+	// Update last read offset
+	f.lastReadOffset.Store(offset + int64(n))
 
-	// If we got data, return it (even if partial)
-	if n > 0 {
-		// Update last read offset for sequential detection
-		f.lastReadOffset.Store(offset + int64(n))
-		return n, nil
-	}
+	// Start background prefetch for smooth playback
+	go f.aggressiveSequentialPrefetch(ctx, offset+readSize)
 
-	// No data available - this shouldn't happen since we just downloaded threshold
-	return 0, fmt.Errorf("no data available after download")
+	return n, nil
 }
 
 // aggressiveSequentialPrefetch downloads chunks ahead for smooth playback
