@@ -90,6 +90,13 @@ func NewStorage(dbPath string) (*Storage, error) {
 		} else if count > 0 {
 			log.Info().Int("count", count).Msg("Migrated entry metadata to new format")
 		}
+
+		// Migrate from legacy storage if it exists
+		if err := s.migrateFromLegacy(); err != nil {
+			log.Warn().Err(err).Msg("Legacy storage migration failed")
+		} else {
+			log.Info().Msg("Legacy storage migration completed successfully")
+		}
 	}()
 
 	return s, nil
@@ -147,12 +154,6 @@ func (s *Storage) Stats() map[string]interface{} {
 	return stats
 }
 
-// Backup syncs all stores (for HybridStore, data is already on disk)
-func (s *Storage) Backup(path string) error {
-	s.logger.Info().Str("path", path).Msg("Backup - syncing stores")
-	return nil
-}
-
 // SaveMigrationStatus saves the system migration status
 func (s *Storage) SaveMigrationStatus(status *SystemMigrationStatus) error {
 	pb := SystemMigrationStatusToProto(status)
@@ -174,4 +175,75 @@ func (s *Storage) GetMigrationStatus() (*SystemMigrationStatus, error) {
 		return nil, err
 	}
 	return ProtoToSystemMigrationStatus(&pb), nil
+}
+
+func (s *Storage) migrateFromLegacy() error {
+	// Check if decypharr.db folder exists (legacy storage)
+	legacyPath := filepath.Join(s.dir, "decypharr.db")
+	if _, err := os.Stat(legacyPath); os.IsNotExist(err) {
+		return nil // No legacy data, nothing to migrate
+	}
+
+	// Create a new storage instance for the legacy data
+	legacyStorage, err := NewStorage(legacyPath)
+	if err != nil {
+		return fmt.Errorf("failed to open legacy storage: %w", err)
+	}
+	defer legacyStorage.Close()
+
+	// Copy data from legacy storage to new storage
+	if err := s.copyFrom(legacyStorage); err != nil {
+		return fmt.Errorf("failed to copy data from legacy storage: %w", err)
+	}
+
+	// Delete legacy storage directory after successful migration
+	if err := os.RemoveAll(legacyPath); err != nil {
+		return fmt.Errorf("failed to remove legacy storage: %w", err)
+	}
+
+	return nil
+}
+
+func (s *Storage) copyFrom(other *Storage) error {
+	// Copy entries
+	err := other.entries.ForEach(func(key string, value []byte) error {
+		return s.entries.Put(key, value, nil)
+	})
+	if err != nil {
+		return fmt.Errorf("failed to copy entries: %w", err)
+	}
+
+	// Copy queue
+	err = other.queue.ForEach(func(key string, value []byte) error {
+		return s.queue.Put(key, value, nil)
+	})
+	if err != nil {
+		return fmt.Errorf("failed to copy queue: %w", err)
+	}
+
+	// Copy entry items
+	err = other.entryItems.ForEach(func(key string, value []byte) error {
+		return s.entryItems.Put(key, value, nil)
+	})
+	if err != nil {
+		return fmt.Errorf("failed to copy entry items: %w", err)
+	}
+
+	// Copy repair jobs
+	err = other.repairJobs.ForEach(func(key string, value []byte) error {
+		return s.repairJobs.Put(key, value, nil)
+	})
+	if err != nil {
+		return fmt.Errorf("failed to copy repair jobs: %w", err)
+	}
+
+	// Copy repair keys
+	err = other.repairKeys.ForEach(func(key string, value []byte) error {
+		return s.repairKeys.Put(key, value, nil)
+	})
+	if err != nil {
+		return fmt.Errorf("failed to copy repair keys: %w", err)
+	}
+
+	return nil
 }

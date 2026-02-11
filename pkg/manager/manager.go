@@ -89,10 +89,7 @@ func New() *Manager {
 	cfg := config.Get()
 	_logger := logger.New("manager")
 
-	// Create storage directory
-	dbPath := filepath.Join(config.GetMainPath(), "db")
-
-	strg, err := storage.NewStorage(dbPath)
+	strg, err := storage.NewStorage(filepath.Join(config.GetMainPath(), "db"))
 	if err != nil {
 		panic(fmt.Errorf("failed to create manager storage: %w", err))
 	}
@@ -120,7 +117,7 @@ func New() *Manager {
 		IdleConnTimeout:     30 * time.Second,
 		DisableCompression:  true,
 		DialContext:         dialer.DialContext,
-		Proxy:              http.ProxyFromEnvironment,
+		Proxy:               http.ProxyFromEnvironment,
 		ForceAttemptHTTP2:   false,
 	}
 
@@ -357,7 +354,6 @@ func (m *Manager) Start(ctx context.Context) error {
 	// run the migration process
 	m.migrate()
 
-
 	go func() {
 		m.syncTorrents(ctx)
 		// Sync NZBs
@@ -450,8 +446,7 @@ func (m *Manager) Reset() error {
 	}
 
 	// Reopen storage database (it was closed by Stop)
-	dbPath := filepath.Join(config.GetMainPath(), "decypharr.db")
-	strg, err := storage.NewStorage(dbPath)
+	strg, err := storage.NewStorage(filepath.Join(config.GetMainPath(), "db"))
 	if err != nil {
 		return fmt.Errorf("failed to reopen storage after reset: %w", err)
 	}
