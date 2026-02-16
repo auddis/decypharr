@@ -86,13 +86,6 @@ func NewCache(ctx context.Context, mgr *manager.Manager, config *config.FuseConf
 	return c, nil
 }
 
-func (c *Cache) addBytes(delta int64) {
-	if delta <= 0 {
-		return
-	}
-	c.totalSize.Add(delta)
-}
-
 func (c *Cache) rebuildIndex() error {
 	now := utils.Now()
 	candidates, totalSize := c.scanDiskCandidates()
@@ -422,13 +415,13 @@ func (c *Cache) cleanup() {
 		threshold = maxSize
 	}
 
-	// If cache expiry is disabled and we're under threshold, skip disk scan.
-	if c.config.CacheExpiry <= 0 && (maxSize <= 0 || c.totalSize.Load() <= threshold) {
-		return
-	}
-
 	oldSize := c.totalSize.Load()
 	candidates, totalSize := c.scanDiskCandidates()
+
+	// If cache expiry is disabled and we're under threshold, skip disk scan.
+	if c.config.CacheExpiry <= 0 && (maxSize <= 0 || totalSize <= threshold) {
+		return
+	}
 
 	totalSize, removedCount := c.evictCandidates(now, candidates, totalSize, threshold)
 
@@ -692,15 +685,9 @@ func (item *CacheItem) WriteAtNoOverwrite(p []byte, off int64) (n, skipped int, 
 
 	// Mark range as present
 	item.metaMu.Lock()
-	before := item.info.Rs.Size()
 	item.info.Rs.Insert(writeRange)
-	after := item.info.Rs.Size()
 	item.metaMu.Unlock()
 	item.markMetadataDirty()
-
-	if delta := after - before; delta > 0 {
-		item.cache.addBytes(delta)
-	}
 	return n, skipped, nil
 }
 
