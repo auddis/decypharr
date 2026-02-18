@@ -355,7 +355,7 @@ func (c *Cache) newItem(key, entryName, filename string, fileSize int64) (*Cache
 	}
 
 	// Create downloaders coordinator
-	item.downloaders.Store(NewDownloaders(c.ctx, c.manager, item, c.config))
+	item.downloaders = NewDownloaders(c.ctx, c.manager, item, c.config)
 	item.startMetaWriter()
 	item.markMetadataDirty()
 
@@ -465,15 +465,16 @@ type CacheItem struct {
 
 	file     *os.File
 	metaPath string
+
 	info ItemInfo
 
 	opens       atomic.Int32 // Number of open handles (prevents eviction)
 	logger      *logger.RateLimitedEvent
-	downloaders atomic.Pointer[Downloaders] // Download coordinator
+	downloaders *Downloaders // Download coordinator
 
-	metaMu    sync.RWMutex
-	fileMu    sync.RWMutex
-	lastTouch atomic.Int64 // Unix nano for rate-limited touch()
+	metaMu sync.RWMutex
+	fileMu sync.RWMutex
+	dlMu   sync.Mutex
 
 	metaDirty   atomic.Bool
 	metaFlushCh chan struct{}
@@ -566,18 +567,10 @@ type ItemInfo struct {
 	ATime   time.Time     `json:"atime"`
 }
 
-// touch updates access time, rate-limited to once per second to reduce lock contention
+// touch updates access time
 func (item *CacheItem) touch() {
-	now := time.Now().UnixNano()
-	last := item.lastTouch.Load()
-	if now-last < int64(time.Second) {
-		return
-	}
-	if !item.lastTouch.CompareAndSwap(last, now) {
-		return
-	}
 	item.metaMu.Lock()
-	item.info.ATime = time.Unix(0, now)
+	item.info.ATime = utils.Now()
 	item.metaMu.Unlock()
 	item.markMetadataDirty()
 }
@@ -588,10 +581,7 @@ func (item *CacheItem) Open() {
 	item.touch()
 }
 
-// Release decrements the open count.
-// Don't stop downloaders immediately - let idle timeout handle it.
-// Immediate stop can cause playback errors if downloads are in progress
-// (e.g. scanner opens/closes file while player is reading).
+// Release decrements the open count
 func (item *CacheItem) Release() {
 	newCount := item.opens.Add(-1)
 	if newCount < 0 {
@@ -602,7 +592,11 @@ func (item *CacheItem) Release() {
 // StopDownloaders stops active downloads but keeps the cache item alive
 // for potential cache reuse. This is called when all file handles are closed.
 func (item *CacheItem) StopDownloaders() {
-	if dls := item.downloaders.Load(); dls != nil {
+	item.dlMu.Lock()
+	dls := item.downloaders
+	item.dlMu.Unlock()
+
+	if dls != nil {
 		dls.StopAll()
 	}
 }
@@ -623,7 +617,9 @@ func (item *CacheItem) ReadAt(p []byte, off int64) (int, error) {
 	r := ranges.Range{Pos: off, Size: readSize}
 
 	// Ensure data is on disk (may block)
-	dls := item.downloaders.Load()
+	item.dlMu.Lock()
+	dls := item.downloaders
+	item.dlMu.Unlock()
 	if dls == nil {
 		return 0, errors.New("downloaders closed")
 	}
@@ -658,11 +654,9 @@ func (item *CacheItem) WriteAtNoOverwrite(p []byte, off int64) (n, skipped int, 
 	item.metaMu.RUnlock()
 	frs := rsSnapshot.FindAll(writeRange)
 
-	// RLock is sufficient: pwrite(2) is goroutine-safe at different offsets,
-	// and the lock only guards against the file being closed during I/O.
-	item.fileMu.RLock()
+	item.fileMu.Lock()
 	if item.file == nil {
-		item.fileMu.RUnlock()
+		item.fileMu.Unlock()
 		return n, skipped, errors.New("cache file closed")
 	}
 	f := item.file
@@ -676,11 +670,11 @@ func (item *CacheItem) WriteAtNoOverwrite(p []byte, off int64) (n, skipped int, 
 		localOff := fr.R.Pos - off
 		_, err = f.WriteAt(p[localOff:localOff+fr.R.Size], fr.R.Pos)
 		if err != nil {
-			item.fileMu.RUnlock()
+			item.fileMu.Unlock()
 			return n, skipped, err
 		}
 	}
-	item.fileMu.RUnlock()
+	item.fileMu.Unlock()
 
 	// Mark range as present
 	item.metaMu.Lock()
@@ -715,8 +709,11 @@ func (item *CacheItem) FindMissing(r ranges.Range) ranges.Range {
 // Close closes the cache item and saves metadata
 func (item *CacheItem) Close() error {
 	item.closeOnce.Do(func() {
-		// Atomically swap out the downloaders pointer so no new reads can use it.
-		dls := item.downloaders.Swap(nil)
+		// Stop downloaders without holding the downloaders lock to avoid deadlocks.
+		item.dlMu.Lock()
+		dls := item.downloaders
+		item.downloaders = nil
+		item.dlMu.Unlock()
 
 		if dls != nil {
 			if err := dls.Close(nil); err != nil && item.closeErr == nil {

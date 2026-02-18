@@ -31,8 +31,6 @@ const (
 	idleTimeout = 30 * time.Second
 	// circuitCooldownDuration is how long to block requests after max errors reached
 	circuitCooldownDuration = 20 * time.Minute
-
-	maxChunkSizeMultiplier = 6
 )
 
 // Downloaders coordinates multiple concurrent downloads to a cache item
@@ -47,8 +45,8 @@ type Downloaders struct {
 	retries       int
 
 	mu         sync.Mutex
-	cond       *sync.Cond // Broadcast when new data arrives or errors occur
 	dls        []*downloader
+	waiters    []waiter
 	errorCount int
 	lastErr    error
 	closed     bool
@@ -57,8 +55,8 @@ type Downloaders struct {
 	// streamID is the active stream registration ID for tracking
 	streamID string
 
-	// Number of goroutines blocked in Download() waiting for data
-	waitingCount atomic.Int32
+	// Atomic waiter count for fast-path check (avoids locking dls.mu in Write() when no waiters)
+	waiterCount atomic.Int32
 
 	// Idle timeout tracking
 	lastActivity atomic.Int64  // Unix nano timestamp of last download activity
@@ -91,6 +89,12 @@ func (dls *Downloaders) untrackStreamLocked() {
 	dls.streamID = ""
 }
 
+// waiter represents a caller waiting for a range to be downloaded
+type waiter struct {
+	r       ranges.Range
+	errChan chan<- error
+}
+
 // downloader represents a single download goroutine
 type downloader struct {
 	dls  *Downloaders
@@ -107,7 +111,6 @@ type downloader struct {
 
 	baseChunkSize    int64
 	currentChunkSize int64
-	maxChunkSize     int64
 
 	wg sync.WaitGroup
 
@@ -143,7 +146,6 @@ func NewDownloaders(ctx context.Context, mgr *manager.Manager, item *CacheItem, 
 		// streamID is populated lazily when the first read occurs.
 		streamID: "",
 	}
-	dls.cond = sync.NewCond(&dls.mu)
 	dls.touchActivity() // Initialize activity timestamp
 
 	// Background kicker to handle stalled waiters and idle detection
@@ -175,55 +177,44 @@ func (dls *Downloaders) Download(r ranges.Range) error {
 	}
 
 	dls.mu.Lock()
-	defer dls.mu.Unlock()
-
 	if dls.closed {
+		dls.mu.Unlock()
 		return errors.New("downloaders closed")
 	}
 
 	// Fast path: already have it
 	if dls.item.HasRange(r) {
 		dls.ensureDownloaderLocked(r)
+		dls.mu.Unlock()
 		return nil
 	}
+	// Create waiter channel
+	errChan := make(chan error, 1)
+	dls.waiters = append(dls.waiters, waiter{r: r, errChan: errChan})
+	dls.waiterCount.Add(1)
 
-	// Ensure downloader running before waiting
+	// Ensure downloader running
 	if err := dls.ensureDownloaderLocked(r); err != nil {
+		// Remove our waiter on error
+		dls.removeWaiterLocked(errChan)
+		dls.mu.Unlock()
 		return err
 	}
 
-	// Wait loop: cond.Wait releases mu, sleeps until Broadcast, reacquires mu
-	dls.waitingCount.Add(1)
-	defer dls.waitingCount.Add(-1)
+	dls.mu.Unlock()
 
-	for {
-		dls.cond.Wait()
+	// Block until range is fulfilled or error
+	return <-errChan
+}
 
-		if dls.closed {
-			if dls.lastErr != nil {
-				return dls.lastErr
-			}
-			return errors.New("downloaders closed")
+// removeWaiterLocked removes a waiter by its channel (call with lock held)
+func (dls *Downloaders) removeWaiterLocked(errChan chan<- error) {
+	for i, w := range dls.waiters {
+		if w.errChan == errChan {
+			dls.waiters = append(dls.waiters[:i], dls.waiters[i+1:]...)
+			dls.waiterCount.Add(-1)
+			return
 		}
-
-		// Clip range to file size (file might have been truncated)
-		clipped := r
-		clipped.Clip(dls.item.info.Size)
-
-		if dls.item.HasRange(clipped) {
-			dls.ensureDownloaderLocked(r)
-			return nil
-		}
-
-		if dls.errorCount >= maxErrorCount {
-			if dls.lastErr != nil {
-				return fmt.Errorf("too many errors (%d): %w", dls.errorCount, dls.lastErr)
-			}
-			return fmt.Errorf("too many errors (%d)", dls.errorCount)
-		}
-
-		// Re-ensure downloader for our range (it may have stopped)
-		_ = dls.ensureDownloaderLocked(r)
 	}
 }
 
@@ -243,58 +234,43 @@ func (dls *Downloaders) ensureDownloaderLocked(r ranges.Range) error {
 		bufferWindow = dls.chunkSize * 4
 	}
 
-	fileSize := dls.item.info.Size
-	if r.Pos >= fileSize {
-		return nil
-	}
+	// Clip to what's missing
+	r = dls.item.FindMissing(r)
 
-	// Clamp request to the file size.
-	if end := r.End(); end > fileSize {
-		r.Size = fileSize - r.Pos
-	}
+	// If the requested range is already present, check the buffer window
+	startNew := true
 	if r.IsEmpty() {
+		// Extend by buffer window to check if upcoming data needs downloading
+		rWindow := r
+		rWindow.Size += bufferWindow
+		if rWindow.Pos+rWindow.Size > dls.item.info.Size {
+			rWindow.Size = dls.item.info.Size - rWindow.Pos
+		}
+
+		rWindowClipped := dls.item.FindMissing(rWindow)
+		if rWindowClipped.IsEmpty() {
+			// Buffer window is full — just kick existing downloader
+			startNew = false
+			r.Pos = rWindow.Pos + rWindow.Size
+		} else {
+			// Gap in the buffer window — start downloading from there
+			r.Pos = rWindowClipped.Pos
+		}
+		r.Size = 0
+	}
+
+	// Nothing to download and no new downloader needed
+	if !startNew && r.Size == 0 {
+		// Still kick an existing downloader to prevent idle timeout
+		dls.kickExistingDownloaderLocked(r.Pos)
+		return nil
+	}
+	if r.Size == 0 {
 		return nil
 	}
 
-	request := r
-	missing := dls.item.FindMissing(request)
-
-	// Desired prefetch window is request end + read ahead.
-	prefetchStart := request.End()
-	prefetchEnd := prefetchStart
-	if bufferWindow > 0 && prefetchEnd < fileSize {
-		remaining := fileSize - prefetchEnd
-		if bufferWindow < remaining {
-			prefetchEnd += bufferWindow
-		} else {
-			prefetchEnd = fileSize
-		}
-	}
-
-	// If the request is already cached, prefetch from the look-ahead window.
-	if missing.IsEmpty() {
-		if prefetchEnd <= prefetchStart {
-			dls.kickExistingDownloaderLocked(prefetchStart)
-			return nil
-		}
-		lookAhead := ranges.Range{
-			Pos:  prefetchStart,
-			Size: prefetchEnd - prefetchStart,
-		}
-		missing = dls.item.FindMissing(lookAhead)
-		if missing.IsEmpty() {
-			// Buffer window is full — just kick existing downloader.
-			dls.kickExistingDownloaderLocked(prefetchStart)
-			return nil
-		}
-	}
-
-	// Keep downloader running to the end of the desired prefetch window.
-	targetEnd := missing.End()
-	if prefetchEnd > targetEnd {
-		targetEnd = prefetchEnd
-	}
-	r = missing
+	// Target end: download the full missing range
+	targetEnd := r.Pos + r.Size
 
 	// Check error count
 	if dls.errorCount >= maxErrorCount {
@@ -355,7 +331,6 @@ func (dls *Downloaders) newDownloaderLocked(r ranges.Range, targetEnd int64) err
 		maxOffset:        targetEnd,
 		baseChunkSize:    baseChunk,
 		currentChunkSize: baseChunk,
-		maxChunkSize:     baseChunk * maxChunkSizeMultiplier,
 	}
 
 	dls.dls = append(dls.dls, dl)
@@ -407,19 +382,49 @@ func (dls *Downloaders) countErrors(n int64, err error) {
 		// Trip circuit breaker when max errors reached
 		if dls.errorCount >= maxErrorCount {
 			dls.openCircuitLocked()
-			// Wake waiters so they see the error
-			dls.cond.Broadcast()
 		}
 	}
 }
 
-// kickWaiters wakes all goroutines blocked in Download() so they can
-// re-check whether their range is now present or an error occurred.
+// kickWaiters checks all waiters and fulfills completed ones
 func (dls *Downloaders) kickWaiters() {
-	dls.cond.Broadcast()
+	dls.mu.Lock()
+	defer dls.mu.Unlock()
+
+	if len(dls.waiters) == 0 {
+		return
+	}
+
+	// Check circuit state once to avoid spinning
+	circuitOpen := dls.circuitOpen.Load()
+
+	fulfilled := 0
+	remaining := dls.waiters[:0]
+	for _, w := range dls.waiters {
+		// Clip range to actual file size
+		r := w.r
+		r.Clip(dls.item.info.Size)
+
+		if dls.item.HasRange(r) {
+			w.errChan <- nil // Fulfilled!
+			fulfilled++
+		} else if circuitOpen || dls.errorCount >= maxErrorCount {
+			// Circuit is open or max errors reached - fail waiter without creating new downloaders
+			w.errChan <- dls.lastErr
+			fulfilled++
+		} else {
+			remaining = append(remaining, w)
+			// Ensure there's a downloader for this waiter
+			_ = dls.ensureDownloaderLocked(w.r)
+		}
+	}
+	dls.waiters = remaining
+	if fulfilled > 0 {
+		dls.waiterCount.Add(-int32(fulfilled))
+	}
 }
 
-// Close stops all downloaders and wakes any goroutines blocked in Download()
+// Close stops all downloaders and returns unfulfilled waiters with error
 func (dls *Downloaders) Close(inErr error) error {
 	dls.mu.Lock()
 	if dls.closed {
@@ -427,11 +432,6 @@ func (dls *Downloaders) Close(inErr error) error {
 		return nil
 	}
 	dls.closed = true
-	if inErr != nil {
-		dls.lastErr = inErr
-	} else if dls.lastErr == nil {
-		dls.lastErr = errors.New("downloaders closed")
-	}
 	dls.untrackStreamLocked()
 
 	// Copy slice before unlocking to avoid races while waiting.
@@ -442,11 +442,7 @@ func (dls *Downloaders) Close(inErr error) error {
 	for _, dl := range dlsCopy {
 		dl.stop()
 	}
-	dls.dls = nil
 	dls.mu.Unlock()
-
-	// Wake all blocked Download() callers so they see closed=true
-	dls.cond.Broadcast()
 
 	// Cancel first so any blocked stream operation can exit promptly.
 	dls.cancel()
@@ -457,6 +453,20 @@ func (dls *Downloaders) Close(inErr error) error {
 	}
 
 	dls.wg.Wait()
+
+	// Close remaining waiters
+	dls.mu.Lock()
+	for _, w := range dls.waiters {
+		if inErr != nil {
+			w.errChan <- inErr
+		} else {
+			w.errChan <- errors.New("downloaders closed")
+		}
+	}
+	dls.waiterCount.Store(0)
+	dls.waiters = nil
+	dls.dls = nil
+	dls.mu.Unlock()
 
 	return nil
 }
@@ -520,8 +530,8 @@ func (dls *Downloaders) checkIdleTimeout() bool {
 		return true
 	}
 
-	// Don't timeout if there are goroutines waiting for data
-	if dls.waitingCount.Load() > 0 {
+	// Don't timeout if there are active waiters
+	if len(dls.waiters) > 0 {
 		return false
 	}
 
@@ -657,8 +667,7 @@ func (dl *downloader) run() (totalBytes int64, err error) {
 		}
 
 		// Calculate chunk boundaries
-		// chunkSize may exceed targetEnd, but the extra bytes are stored
-		// in the sparse cache and serve future reads — not wasted.
+		// Always download at least chunkSize to reduce Stream calls
 		chunkEnd := start + chunkSize
 		if chunkEnd > fileSize {
 			chunkEnd = fileSize
@@ -697,8 +706,6 @@ func (dl *downloader) getState() (start, targetEnd, chunkSize, fileSize int64, s
 			chunkSize = 4 * 1024 * 1024
 		}
 	}
-
-	chunkSize = min(chunkSize, dl.maxChunkSize)
 
 	fileSize = dl.dls.item.info.Size
 	targetEnd = dl.maxOffset
@@ -969,8 +976,8 @@ func (w *cacheWriter) Write(p []byte) (int, error) {
 	actuallyWritten := int64(n - skipped)
 	w.written += actuallyWritten
 
-	if actuallyWritten > 0 && w.dl.dls.waitingCount.Load() > 0 {
-		w.dl.dls.cond.Broadcast()
+	if actuallyWritten > 0 && w.dl.dls.waiterCount.Load() > 0 {
+		w.dl.dls.kickWaiters()
 	}
 
 	return n, nil
