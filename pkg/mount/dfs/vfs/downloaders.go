@@ -225,8 +225,9 @@ func (dls *Downloaders) getLastErr() error {
 }
 
 // ensureDownloaderLocked finds or creates a downloader for the range.
-// buffer window (readAheadSize) if data is already present. No sequential
-// detection — the downloader idle timeout naturally limits probe waste.
+// It extends the requested range by readAheadSize before clipping to missing
+// data, so the downloader's target always stays ahead of the read position.
+// The downloader idle timeout naturally limits waste on probes/seeks.
 func (dls *Downloaders) ensureDownloaderLocked(r ranges.Range) error {
 	// The buffer window is how far ahead we keep data cached
 	bufferWindow := dls.readAheadSize
@@ -234,38 +235,21 @@ func (dls *Downloaders) ensureDownloaderLocked(r ranges.Range) error {
 		bufferWindow = dls.chunkSize * 4
 	}
 
-	// Clip to what's missing
+	// Extend range by read-ahead BEFORE clipping to missing.
+	// This ensures the downloader's maxOffset stays ahead of the read position,
+	// so sequential reads always have data prefetched.
+	r.Size += bufferWindow
+	if r.Pos+r.Size > dls.item.info.Size {
+		r.Size = dls.item.info.Size - r.Pos
+	}
+
+	// Clip to what's actually missing
 	r = dls.item.FindMissing(r)
 
-	// If the requested range is already present, check the buffer window
-	startNew := true
+	// If the requested range + read-ahead is already present, we just need
+	// to kick an existing downloader to prevent idle timeout. No new download needed.
 	if r.IsEmpty() {
-		// Extend by buffer window to check if upcoming data needs downloading
-		rWindow := r
-		rWindow.Size += bufferWindow
-		if rWindow.Pos+rWindow.Size > dls.item.info.Size {
-			rWindow.Size = dls.item.info.Size - rWindow.Pos
-		}
-
-		rWindowClipped := dls.item.FindMissing(rWindow)
-		if rWindowClipped.IsEmpty() {
-			// Buffer window is full — just kick existing downloader
-			startNew = false
-			r.Pos = rWindow.Pos + rWindow.Size
-		} else {
-			// Gap in the buffer window — start downloading from there
-			r.Pos = rWindowClipped.Pos
-		}
-		r.Size = 0
-	}
-
-	// Nothing to download and no new downloader needed
-	if !startNew && r.Size == 0 {
-		// Still kick an existing downloader to prevent idle timeout
 		dls.kickExistingDownloaderLocked(r.Pos)
-		return nil
-	}
-	if r.Size == 0 {
 		return nil
 	}
 

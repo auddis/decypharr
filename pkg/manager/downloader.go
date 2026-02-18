@@ -190,19 +190,21 @@ func (d *Downloader) processSymlink(entry *storage.Entry, mountPath string) erro
 			return fmt.Errorf("timeout waiting for files: %d files still pending", len(remainingFiles))
 		}
 	}
-	d.markAsCompleted(entry)
+
+	entry.IsDownloading = true
+	_ = d.manager.queue.Update(entry)
 
 	// Run ffprobe on files to warm cache and trigger imports
 	if !d.manager.config.SkipPreCache && len(filePaths) > 0 {
-		go func() {
-			d.logger.Debug().Msgf("Running ffprobe on %s", entry.Name)
-			if err := d.manager.RunFFprobe(filePaths); err != nil {
-				d.logger.Error().Msgf("Failed to run ffprobe: %s", err)
-			} else {
-				d.logger.Debug().Str("entry", entry.Name).Msgf("Ran ffprobe on %d files", len(filePaths))
-			}
-		}()
+		d.logger.Debug().Msgf("Running ffprobe on %s", entry.Name)
+		if err := d.manager.RunFFprobe(filePaths); err != nil {
+			d.logger.Error().Msgf("Failed to run ffprobe: %s", err)
+		} else {
+			d.logger.Debug().Str("entry", entry.Name).Msgf("Ran ffprobe on %d files", len(filePaths))
+		}
 	}
+
+	d.markAsCompleted(entry)
 
 	return nil
 }

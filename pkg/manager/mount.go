@@ -66,7 +66,7 @@ func (m *Manager) RunFFprobe(filePaths []string) error {
 
 	// Use a worker pool to limit concurrency
 
-	p := pool.New().WithMaxGoroutines(MaxFFprobeWorkers)
+	p := pool.New().WithMaxGoroutines(min(len(filePaths), MaxFFprobeWorkers))
 
 	for _, fp := range filePaths {
 		if !utils.IsMediaFile(fp) {
