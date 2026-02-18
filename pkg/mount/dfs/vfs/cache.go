@@ -591,24 +591,17 @@ func (item *CacheItem) Open() {
 	item.touch()
 }
 
-// Release decrements the open count
+// Release decrements the open count.
+// Don't stop downloaders immediately - let idle timeout handle it.
+// Immediate stop can cause playback errors if downloads are in progress
+// (e.g. scanner opens/closes file while player is reading).
 func (item *CacheItem) Release() {
 	newCount := item.opens.Add(-1)
 	if newCount < 0 {
 		item.opens.Store(0)
-		if item.readBuf != nil {
-			item.readBuf.Clear()
-		}
-		return
 	}
-	if newCount == 0 {
-		if item.readBuf != nil {
-			item.readBuf.Clear()
-		}
-		// Stop background downloads when last handle is closed.
-		// StopAll() cancels in-flight HTTP requests via context and
-		// recreates a fresh context so downloads resume if reopened.
-		item.StopDownloaders()
+	if newCount <= 0 && item.readBuf != nil {
+		item.readBuf.Clear()
 	}
 }
 

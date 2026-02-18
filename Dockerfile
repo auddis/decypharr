@@ -69,7 +69,7 @@ LABEL org.opencontainers.image.authors="sirrobot01"
 LABEL org.opencontainers.image.documentation="https://github.com/sirrobot01/decypharr/blob/main/README.md"
 
 # Install dependencies including rclone (from binary)
-RUN apk add --no-cache fuse3 ca-certificates su-exec shadow curl unzip && \
+RUN apk add --no-cache fuse3 ca-certificates su-exec shadow curl unzip tzdata && \
     echo "user_allow_other" >> /etc/fuse.conf && \
     case "$(uname -m)" in \
         x86_64) ARCH=amd64 ;; \
