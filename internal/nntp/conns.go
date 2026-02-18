@@ -211,8 +211,7 @@ func (c *Connection) GetHeader(messageID string, maxSnippet int) (*YencMetadata,
 	_ = c.conn.SetReadDeadline(time.Now().Add(timeouts.StreamBodyTimeout))
 	defer func() { _ = c.conn.SetReadDeadline(time.Time{}) }()
 
-	bodyReader := c.text.DotReader()
-	dec := nntpyenc.AcquireDecoder(bodyReader)
+	dec := nntpyenc.AcquireDecoder(c.reader)
 	defer nntpyenc.ReleaseDecoder(dec)
 
 	// Read snippet to trigger header parsing and capture metadata.
@@ -266,8 +265,8 @@ func (c *Connection) GetBody(messageID string) ([]byte, error) {
 }
 
 // GetDecodedBody retrieves and decodes article body using streaming yEnc decode.
-// Uses textproto.DotReader + streaming decoder to decode while reading from the
-// network, avoiding intermediate full encoded-body buffering.
+// Uses textproto.DotReader + rapidyenc streaming decoder to decode while reading
+// from the network - no intermediate buffering of the full body.
 func (c *Connection) GetDecodedBody(messageID string) ([]byte, error) {
 	messageID = FormatMessageID(messageID)
 	if err := c.sendCommand(fmt.Sprintf("BODY %s", messageID)); err != nil {
@@ -287,8 +286,7 @@ func (c *Connection) GetDecodedBody(messageID string) ([]byte, error) {
 	_ = c.conn.SetReadDeadline(time.Now().Add(timeouts.StreamBodyTimeout))
 	defer func() { _ = c.conn.SetReadDeadline(time.Time{}) }()
 
-	bodyReader := c.text.DotReader()
-	dec := nntpyenc.AcquireDecoder(bodyReader)
+	dec := nntpyenc.AcquireDecoder(c.reader)
 	// Always release decoder back to pool, even on panic
 	defer nntpyenc.ReleaseDecoder(dec)
 
@@ -299,8 +297,6 @@ func (c *Connection) GetDecodedBody(messageID string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("streaming yenc decode failed: %w", err)
 	}
-	// Decoder may stop at =yend before DotReader reaches article terminator.
-	_, _ = io.Copy(io.Discard, bodyReader)
 	decoded := output.Bytes()
 
 	return decoded, nil
@@ -325,13 +321,10 @@ func (c *Connection) StreamBody(messageID string, w io.Writer) (int64, error) {
 	_ = c.conn.SetReadDeadline(time.Now().Add(timeouts.StreamBodyTimeout))
 	defer func() { _ = c.conn.SetReadDeadline(time.Time{}) }() // Clear deadline
 
-	bodyReader := c.text.DotReader()
-	dec := nntpyenc.AcquireDecoder(bodyReader)
+	dec := nntpyenc.AcquireDecoder(c.reader)
 	// Always release decoder back to pool, even on panic
 	defer nntpyenc.ReleaseDecoder(dec)
 	n, err := io.Copy(w, dec)
-	// Decoder may stop at =yend before DotReader reaches article terminator.
-	_, _ = io.Copy(io.Discard, bodyReader)
 	if err != nil {
 		return n, fmt.Errorf("streaming yenc decode failed: %w", err)
 	}
