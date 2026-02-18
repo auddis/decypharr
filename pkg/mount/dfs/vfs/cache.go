@@ -350,7 +350,6 @@ func (c *Cache) newItem(key, entryName, filename string, fileSize int64) (*Cache
 		filename: filename,
 		file:     fd,
 		metaPath: metaPath,
-		readBuf:  newTailReadBuffer(c.config.MemoryBufferSize),
 		info:     info,
 		logger:   log.Rate(buildCacheKey(entryName, filename)),
 	}
@@ -466,8 +465,6 @@ type CacheItem struct {
 
 	file     *os.File
 	metaPath string
-	readBuf  *tailReadBuffer
-
 	info ItemInfo
 
 	opens       atomic.Int32 // Number of open handles (prevents eviction)
@@ -600,9 +597,6 @@ func (item *CacheItem) Release() {
 	if newCount < 0 {
 		item.opens.Store(0)
 	}
-	if newCount <= 0 && item.readBuf != nil {
-		item.readBuf.Clear()
-	}
 }
 
 // StopDownloaders stops active downloads but keeps the cache item alive
@@ -628,13 +622,6 @@ func (item *CacheItem) ReadAt(p []byte, off int64) (int, error) {
 
 	r := ranges.Range{Pos: off, Size: readSize}
 
-	// Fast path: satisfy from bounded in-memory tail buffer.
-	if item.readBuf != nil {
-		if n, ok := item.readBuf.ReadAt(p, off); ok {
-			return n, nil
-		}
-	}
-
 	// Ensure data is on disk (may block)
 	dls := item.downloaders.Load()
 	if dls == nil {
@@ -654,9 +641,6 @@ func (item *CacheItem) ReadAt(p []byte, off int64) (int, error) {
 	n, err := f.ReadAt(p, off)
 	item.fileMu.RUnlock()
 	if n > 0 {
-		if item.readBuf != nil {
-			item.readBuf.WriteAt(off, p[:n])
-		}
 		dropFileCache(f, off, int64(n))
 	}
 	return n, err
@@ -702,9 +686,6 @@ func (item *CacheItem) WriteAtNoOverwrite(p []byte, off int64) (n, skipped int, 
 	item.metaMu.Lock()
 	item.info.Rs.Insert(writeRange)
 	item.metaMu.Unlock()
-	if item.readBuf != nil && n > 0 {
-		item.readBuf.WriteAt(off, p[:n])
-	}
 	item.markMetadataDirty()
 	return n, skipped, nil
 }
@@ -754,9 +735,6 @@ func (item *CacheItem) Close() error {
 			item.file = nil
 		}
 		item.fileMu.Unlock()
-		if item.readBuf != nil {
-			item.readBuf.Clear()
-		}
 	})
 	return item.closeErr
 }

@@ -56,9 +56,8 @@ type DFS struct {
 	CacheCleanupInterval string `json:"cache_cleanup_interval,omitempty"` // 10m, 1h etc
 
 	// Performance settings
-	ChunkSize        string `json:"chunk_size,omitempty"`         // Initial chunk size, e.g 10MB
-	ReadAheadSize    string `json:"read_ahead_size,omitempty"`    // Read ahead size (deprecated, use MaxChunkSize)
-	MemoryBufferSize string `json:"memory_buffer_size,omitempty"` // In-memory tail buffer for recent reads, e.g. 4MB
+	ChunkSize     string `json:"chunk_size,omitempty"`      // Initial chunk size, e.g 10MB
+	ReadAheadSize string `json:"read_ahead_size,omitempty"` // Read ahead size (deprecated, use MaxChunkSize)
 
 	DaemonTimeout string `json:"daemon_timeout,omitempty"` // Time after which the FUSE daemon will exit if idle
 
@@ -95,9 +94,6 @@ func (c *Config) applyMountEnvVars() {
 	}
 	if val := getEnv("MOUNT__DFS__READ_AHEAD_SIZE"); val != "" {
 		c.Mount.DFS.ReadAheadSize = val
-	}
-	if val := getEnv("MOUNT__DFS__MEMORY_BUFFER_SIZE"); val != "" {
-		c.Mount.DFS.MemoryBufferSize = val
 	}
 	if val := getEnv("MOUNT__DFS__CACHE_EXPIRY"); val != "" {
 		c.Mount.DFS.CacheExpiry = val

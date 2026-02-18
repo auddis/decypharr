@@ -25,8 +25,7 @@ type FuseConfig struct {
 	// Performance settings
 	ChunkSize        int64
 	ReadAheadSize    int64
-	MemoryBufferSize int64
-	DaemonTimeout    time.Duration
+	DaemonTimeout time.Duration
 
 	Retries int
 
@@ -47,7 +46,6 @@ func DefaultFuseConfig() *FuseConfig {
 		CacheCleanupInterval: 5 * time.Minute,  // More frequent cleanup
 		ChunkSize:            4 * 1024 * 1024,  // 4MB chunk size (balance latency vs throughput)
 		ReadAheadSize:        16 * 1024 * 1024, // 16MB read-ahead (4 chunks prefetch)
-		MemoryBufferSize:     4 * 1024 * 1024,  // 4MB per-file in-memory tail buffer
 
 		Retries: 3,
 
@@ -119,20 +117,6 @@ func ParseFuseConfig(mountName string) (*FuseConfig, error) {
 		}
 		fuseConfig.ReadAheadSize = size
 	}
-	if cfg.MemoryBufferSize != "" {
-		size, err := parseSize(cfg.MemoryBufferSize)
-		if err != nil {
-			return nil, fmt.Errorf("invalid memory buffer size: %w", err)
-		}
-		fuseConfig.MemoryBufferSize = size
-	}
-	// Keep memory bounded even if config requests much larger values.
-	if fuseConfig.MemoryBufferSize < 0 {
-		fuseConfig.MemoryBufferSize = 0
-	} else if fuseConfig.MemoryBufferSize > 32*1024*1024 {
-		fuseConfig.MemoryBufferSize = 32 * 1024 * 1024
-	}
-
 	// Otherwise keep the default (4) from DefaultFuseConfig()
 	fuseConfig.UID = cfg.UID
 	fuseConfig.GID = cfg.GID
