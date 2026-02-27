@@ -11,14 +11,15 @@ import (
 )
 
 const (
-	MaxFFprobeWorkers = 10
-	FFprobeTimeout    = 60 * time.Second
+	MaxFFprobeWorkers   = 10
+	MaxNZBPreCacheFiles = 5
+	FFprobeTimeout      = 60 * time.Second
 )
 
 type MountManager interface {
 	Start(ctx context.Context) error
 	Stop() error
-	Stats() *MountStats
+	Stats() map[string]interface{}
 	IsReady() bool
 	Type() string
 	Refresh(dirs []string) error
@@ -64,8 +65,7 @@ func (m *Manager) RunFFprobe(filePaths []string) error {
 		return err
 	}
 
-	// Use a worker pool to limit concurrency
-
+	// Use a worker pool to limit concurrency and avoid overwhelming the system
 	p := pool.New().WithMaxGoroutines(min(len(filePaths), MaxFFprobeWorkers))
 
 	for _, fp := range filePaths {
@@ -112,11 +112,13 @@ func (s *stubMountManager) Start(ctx context.Context) error {
 func (s *stubMountManager) Stop() error {
 	return nil
 }
+func (s *stubMountManager) Stats() map[string]interface{} {
+	return map[string]interface{}{
+		"message": "no mount configured",
+	}
+}
 func (s *stubMountManager) IsReady() bool {
 	return false
-}
-func (s *stubMountManager) Stats() *MountStats {
-	return &MountStats{Enabled: false}
 }
 func (s *stubMountManager) Type() string {
 	return "none"

@@ -160,7 +160,7 @@ func (a *Arr) Import(downloadID string) (io.ReadCloser, error) {
 	var data []ImportResponseSchema
 	_, err := a.Request(http.MethodGet, url, nil, &data)
 	if err != nil {
-		return nil, fmt.Errorf("failed to import, invalid file: %w", err)
+		return nil, fmt.Errorf("failed to import: %w", err)
 	}
 	var files []ManualImportRequestFile
 	for _, d := range data {

@@ -134,18 +134,21 @@ func (m *Manager) Disable(account *Account) {
 
 	account.MarkDisabled()
 
-	// If we're disabling the current account, it will be replaced
-	// on the next Current() call - no need to proactively update
-	current := m.current.Load()
-	if current != nil && current.Token == account.Token {
-		// Optional: immediately find replacement
-		activeAccounts := m.Active()
-		if len(activeAccounts) > 0 {
-			m.current.Store(activeAccounts[0])
-		} else {
+	// If the disabled account is currently in use, refresh the current account to switch to a new active one
+	activeAccounts := m.Active()
+	if len(activeAccounts) == 0 {
+		m.logger.Warn().Str("debrid", m.debrid).Msg("No active accounts available after disabling, all accounts are disabled, falling back to disabled accounts")
+		allAccounts := m.All()
+		if len(allAccounts) == 0 {
+			m.logger.Error().Str("debrid", m.debrid).Msg("Cannot set current account, no accounts available")
 			m.current.Store(nil)
+			return
 		}
+		m.current.Store(allAccounts[0])
+		return
 	}
+	// Set current to first active account
+	m.current.Store(activeAccounts[0])
 }
 
 func (m *Manager) Reset() {

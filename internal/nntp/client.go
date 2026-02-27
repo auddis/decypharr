@@ -20,15 +20,17 @@ import (
 	"github.com/sirrobot01/decypharr/internal/customerror"
 	"github.com/sirrobot01/decypharr/internal/logger"
 	"github.com/sirrobot01/decypharr/internal/retry"
+	"github.com/sirrobot01/decypharr/internal/utils"
 )
 
 // ProviderPool manages connections for a single provider using a LIFO stack
 type ProviderPool struct {
-	conns  []*connectionEntry // Stack: Push/Pop from end
-	mu     sync.Mutex         // Protects conns slice only
-	slots  chan struct{}      // Semaphore: capacity = max connections
-	max    int
-	config config.UsenetProvider
+	conns       []*connectionEntry // Stack: Push/Pop from end
+	mu          sync.Mutex         // Protects conns slice only
+	slots       chan struct{}      // Semaphore: capacity = max connections
+	max         int
+	config      config.UsenetProvider
+	activeConns sync.Map // *Connection → struct{}; tracks checked-out connections for force-close on shutdown
 }
 
 // Client manages a pool of NNTP connections.
@@ -72,6 +74,8 @@ type TimeoutConfig struct {
 	HandshakeTimeout time.Duration
 	// Read deadline for streaming segment data
 	StreamBodyTimeout time.Duration
+	// Deadline for lightweight health checks (DATE)
+	PingTimeout time.Duration
 	// Health check connections idle longer than this
 	StaleThreshold time.Duration
 	// Close connections idle longer than this
@@ -88,13 +92,54 @@ var DefaultTimeouts = TimeoutConfig{
 	KeepAlive:         30 * time.Second,
 	HandshakeTimeout:  10 * time.Second,
 	StreamBodyTimeout: 60 * time.Second,
+	PingTimeout:       1500 * time.Millisecond,
 	StaleThreshold:    10 * time.Second,
 	IdleTimeout:       20 * time.Second,
-	ReaperInterval:    20 * time.Second,
+	ReaperInterval:    5 * time.Second,
 }
 
 // Package-level timeouts used by all clients
-var timeouts = DefaultTimeouts
+var timeouts = normalizeTimeouts(DefaultTimeouts)
+
+func normalizeTimeouts(in TimeoutConfig) TimeoutConfig {
+	if in.DialTimeout <= 0 {
+		in.DialTimeout = 10 * time.Second
+	}
+	if in.KeepAlive <= 0 {
+		in.KeepAlive = 30 * time.Second
+	}
+	if in.HandshakeTimeout <= 0 {
+		in.HandshakeTimeout = 10 * time.Second
+	}
+	if in.StreamBodyTimeout <= 0 {
+		in.StreamBodyTimeout = 60 * time.Second
+	}
+	if in.PingTimeout <= 0 {
+		in.PingTimeout = 1500 * time.Millisecond
+	}
+	if in.IdleTimeout <= 0 {
+		in.IdleTimeout = 20 * time.Second
+	}
+	// Keep stale checks meaningful: stale must be >0 and below idle timeout.
+	if in.StaleThreshold <= 0 || in.StaleThreshold >= in.IdleTimeout {
+		in.StaleThreshold = in.IdleTimeout / 2
+		if in.StaleThreshold <= 0 {
+			in.StaleThreshold = 10 * time.Second
+		}
+	}
+	if in.ReaperInterval <= 0 {
+		in.ReaperInterval = 5 * time.Second
+	}
+	// Sweep frequently enough to avoid long idle overhang.
+	maxReaperInterval := in.IdleTimeout / 4
+	if maxReaperInterval < time.Second {
+		maxReaperInterval = time.Second
+	}
+	if in.ReaperInterval > maxReaperInterval {
+		in.ReaperInterval = maxReaperInterval
+	}
+	return in
+}
 
 // NewClient creates a new connection manager
 func NewClient(cfg *config.Config) (*Client, error) {
@@ -107,6 +152,7 @@ func NewClient(cfg *config.Config) (*Client, error) {
 	sort.Slice(providers, func(i, j int) bool {
 		return providers[i].Priority < providers[j].Priority
 	})
+
 	pools := make(map[string]*ProviderPool)
 	for _, p := range providers {
 		pp := &ProviderPool{
@@ -143,6 +189,8 @@ func (c *Client) put(conn *Connection, provider config.UsenetProvider) {
 		return
 	}
 
+	pp.activeConns.Delete(conn) // Deregister from active tracking
+
 	// Don't return closed connections to pool
 	if conn.IsClosed() {
 		_ = conn.Close()
@@ -159,7 +207,7 @@ func (c *Client) put(conn *Connection, provider config.UsenetProvider) {
 	entry := &connectionEntry{
 		conn:     conn,
 		provider: provider,
-		lastUsed: time.Now(),
+		lastUsed: utils.Now(),
 	}
 
 	pp.mu.Lock()
@@ -181,7 +229,8 @@ func (c *Client) release(conn *Connection) {
 	if conn != nil {
 		_ = conn.Close()
 		if pp, ok := c.pools[conn.address]; ok {
-			<-pp.slots // Release slot
+			pp.activeConns.Delete(conn) // Deregister from active tracking
+			<-pp.slots                  // Release slot
 		}
 	}
 }
@@ -203,6 +252,13 @@ func (c *Client) isHealthy(entry *connectionEntry) bool {
 		}
 	}
 	return true
+}
+
+func isIdleExpired(lastUsed time.Time, now time.Time) bool {
+	if lastUsed.IsZero() {
+		return false
+	}
+	return now.Sub(lastUsed) > timeouts.IdleTimeout
 }
 
 // ExecuteWithFailover executes an operation with automatic provider failover and retry logic.
@@ -237,8 +293,11 @@ func (c *Client) ExecuteWithFailover(ctx context.Context, fn func(conn *Connecti
 				if errors.As(execErr, &nntpErr) {
 					switch nntpErr.Type {
 					case ErrorTypeConnection, ErrorTypeTimeout, ErrorTypeServerBusy:
-						// Retriable error - release the potentially dead connection
-						c.release(currentConn)
+						// Retriable error - release the potentially dead connection.
+						// Nil currentConn first to prevent double slot-release if new connection acquisition fails.
+						releasedConn := currentConn
+						currentConn = nil
+						c.release(releasedConn)
 						// Get a fresh connection for retry
 						newConn, _, connErr := c.getAnyAvailableConnection(ctx, map[string]bool{})
 						if connErr != nil {
@@ -264,8 +323,11 @@ func (c *Client) ExecuteWithFailover(ctx context.Context, fn func(conn *Connecti
 						return retry.Unrecoverable(execErr)
 					}
 				} else if customerror.IsPanicError(execErr) {
-					// Panic error - release connection
-					c.release(currentConn)
+					// Panic error - release connection.
+					// Nil currentConn first to prevent double slot-release after retry loop.
+					releasedConn := currentConn
+					currentConn = nil
+					c.release(releasedConn)
 					return retry.Unrecoverable(execErr)
 				}
 				// Unknown error type - don't retry
@@ -402,6 +464,12 @@ func (c *Client) getAnyAvailableConnection(ctx context.Context, excludedProvider
 
 // raceForConnection spawns goroutines that race to acquire a connection slot.
 // Returns as soon as any provider has availability.
+//
+// Each goroutine reports exactly one result (success or error) via resultCh, or
+// exits silently if it never acquired a slot. A WaitGroup + channel-close ensures
+// the receiver loop always terminates, and any extra connections won by multiple
+// goroutines are properly returned to the pool — preventing slot leaks under heavy
+// concurrent import load.
 func (c *Client) raceForConnection(ctx context.Context, eligible []config.UsenetProvider) (*Connection, config.UsenetProvider, error) {
 	type result struct {
 		conn     *Connection
@@ -409,71 +477,110 @@ func (c *Client) raceForConnection(ctx context.Context, eligible []config.Usenet
 		err      error
 	}
 
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	innerCtx, cancel := context.WithCancel(ctx)
 
-	// Buffer for all possible results to prevent goroutine leaks
+	// Buffer for all possible results — goroutines that win the slot race send here.
 	resultCh := make(chan result, len(eligible))
+	var wg sync.WaitGroup
 
 	for _, provider := range eligible {
+		wg.Add(1)
 		go func(p config.UsenetProvider) {
+			defer wg.Done()
 			pp := c.pools[p.Host]
 
 			// Block waiting for slot (respects context)
 			select {
 			case pp.slots <- struct{}{}:
 				// Got slot
-			case <-ctx.Done():
-				return // Context cancelled, exit cleanly
+			case <-innerCtx.Done():
+				return // Context cancelled before we got a slot — no send needed
 			}
 
 			// Check if context was cancelled while we were waiting
-			if ctx.Err() != nil {
+			if innerCtx.Err() != nil {
 				<-pp.slots // Release slot
 				return
 			}
 
 			// Try to get or create connection
-			conn, err := c.getOrCreateFromPool(ctx, pp, p)
+			conn, err := c.getOrCreateFromPool(innerCtx, pp, p)
 			if err != nil {
 				<-pp.slots // Release slot on error
-				// Send error result
 				select {
 				case resultCh <- result{nil, p, err}:
-				case <-ctx.Done():
+				case <-innerCtx.Done():
 				}
 				return
 			}
 
-			// Try to send success result
+			// Send the result; if the inner context was already cancelled (another
+			// goroutine won), return our connection to the pool immediately.
 			select {
 			case resultCh <- result{conn, p, nil}:
-				// Successfully sent
-			case <-ctx.Done():
-				// Context cancelled - another goroutine won, return our connection
-				c.put(conn, p)
+				// Slot is still held — the receiver will call returnOrReleaseConn.
+			case <-innerCtx.Done():
+				c.put(conn, p) // releases slot
 			}
 		}(provider)
 	}
 
-	// Wait for first successful result or all failures
+	// Close resultCh once all goroutines have finished so the receiver loop below
+	// can terminate without needing an explicit count.
+	go func() {
+		wg.Wait()
+		close(resultCh)
+		cancel()
+	}()
+
+	// Drain all results:
+	//  - First success becomes the winner; cancel() is called to stop remaining goroutines.
+	//  - Any subsequent successes (from goroutines that raced to completion before cancel
+	//    reached them) have their connections returned to the pool to prevent slot leaks.
+	//  - Errors are collected so we can return a meaningful error if there is no winner.
+	var winConn *Connection
+	var winProvider config.UsenetProvider
 	var lastErr error
-	for i := 0; i < len(eligible); i++ {
+
+	for {
 		select {
-		case r := <-resultCh:
-			if r.err == nil && r.conn != nil {
-				return r.conn, r.provider, nil
+		case r, ok := <-resultCh:
+			if !ok {
+				// Channel closed — all goroutines have finished.
+				if winConn != nil {
+					return winConn, winProvider, nil
+				}
+				if lastErr != nil {
+					return nil, config.UsenetProvider{}, lastErr
+				}
+				return nil, config.UsenetProvider{}, errors.New("failed to get connection from any provider")
 			}
-			lastErr = r.err
+			if r.err == nil && r.conn != nil {
+				if winConn == nil {
+					winConn = r.conn
+					winProvider = r.provider
+					cancel() // Tell losing goroutines to stop ASAP.
+				} else {
+					// Extra winner arrived before cancel propagated — release it.
+					c.returnOrReleaseConn(r.conn, r.provider)
+				}
+			} else if r.err != nil {
+				lastErr = r.err
+			}
 		case <-ctx.Done():
+			// Parent context cancelled — cancel inner, drain remaining connections
+			// in background so we don't block the caller.
+			cancel()
+			go func() {
+				for r := range resultCh {
+					if r.conn != nil {
+						c.returnOrReleaseConn(r.conn, r.provider)
+					}
+				}
+			}()
 			return nil, config.UsenetProvider{}, ctx.Err()
 		}
 	}
-
-	if lastErr != nil {
-		return nil, config.UsenetProvider{}, lastErr
-	}
-	return nil, config.UsenetProvider{}, errors.New("failed to get connection from any provider")
 }
 
 // getOrCreateFromPool tries to get an existing connection from pool, or creates a new one.
@@ -490,8 +597,15 @@ func (c *Client) getOrCreateFromPool(ctx context.Context, pp *ProviderPool, prov
 			pp.conns = pp.conns[:n-1]
 			pp.mu.Unlock()
 
+			now := utils.Now()
+			if isIdleExpired(entry.lastUsed, now) {
+				_ = entry.conn.Close()
+				continue
+			}
+
 			// Health check outside lock
 			if c.isHealthy(entry) {
+				pp.activeConns.Store(entry.conn, struct{}{}) // Register as active (checked-out)
 				return entry.conn, nil
 			}
 			// Unhealthy - close and try next pooled connection
@@ -503,7 +617,12 @@ func (c *Client) getOrCreateFromPool(ctx context.Context, pp *ProviderPool, prov
 	}
 
 	// No pooled connection available, create new one
-	return c.createConnection(ctx, provider)
+	conn, err := c.createConnection(ctx, provider)
+	if err != nil {
+		return nil, err
+	}
+	pp.activeConns.Store(conn, struct{}{}) // Register as active (checked-out)
+	return conn, nil
 }
 
 // createConnection creates a new NNTP connection to a provider
@@ -572,7 +691,7 @@ func (c *Client) createConnection(ctx context.Context, provider config.UsenetPro
 
 	// Set deadline for handshake (greeting + auth)
 	// If the server doesn't respond quickly during setup, we should abort.
-	_ = netConn.SetDeadline(time.Now().Add(timeouts.HandshakeTimeout))
+	_ = netConn.SetDeadline(utils.Now().Add(timeouts.HandshakeTimeout))
 
 	// Read greeting
 	line, err := reader.ReadString('\n')
@@ -613,6 +732,7 @@ func (c *Client) reaper() {
 }
 
 func (c *Client) reapIdleConnections() {
+	now := utils.Now()
 	for _, pp := range c.pools {
 		pp.mu.Lock()
 
@@ -620,7 +740,7 @@ func (c *Client) reapIdleConnections() {
 		// Find first non-expired connection; all after it are newer and valid.
 		expiredCount := 0
 		for _, entry := range pp.conns {
-			if time.Since(entry.lastUsed) > timeouts.IdleTimeout {
+			if isIdleExpired(entry.lastUsed, now) {
 				_ = entry.conn.Close()
 				expiredCount++
 			} else {
@@ -645,47 +765,14 @@ func (c *Client) reapIdleConnections() {
 	}
 }
 
-// NNTPPoolStats holds aggregate pool statistics.
-type NNTPPoolStats struct {
-	MaxConnections int `json:"max_connections"`
-	TotalCreated   int `json:"total_created"`
-	Active         int `json:"active"`
-	Idle           int `json:"idle"`
-}
-
-// NNTPSpeedTestStats holds speed test results for a provider.
-type NNTPSpeedTestStats struct {
-	LatencyMs int64   `json:"latency_ms"`
-	SpeedMBps float64 `json:"speed_mbps"`
-	BytesRead int64   `json:"bytes_read"`
-	TestedAt  string  `json:"tested_at"`
-	Error     string  `json:"error,omitempty"`
-}
-
-// NNTPProviderStats holds per-provider connection stats.
-type NNTPProviderStats struct {
-	Host           string              `json:"host"`
-	Port           int                 `json:"port"`
-	MaxConnections int                 `json:"max_connections"`
-	Active         int                 `json:"active"`
-	Idle           int                 `json:"idle"`
-	SSL            bool                `json:"ssl"`
-	SpeedTest      *NNTPSpeedTestStats `json:"speed_test,omitempty"`
-}
-
-// NNTPStats holds the complete NNTP client statistics.
-type NNTPStats struct {
-	Pool      NNTPPoolStats       `json:"pool"`
-	Providers []NNTPProviderStats `json:"providers"`
-}
-
-// Stats returns current pool statistics as a typed struct.
-func (c *Client) Stats() *NNTPStats {
+// Stats returns current pool statistics
+func (c *Client) Stats() map[string]interface{} {
 	if c.closed.Load() {
 		return nil
 	}
 
-	providers := make([]NNTPProviderStats, 0, len(c.providers))
+	stats := make(map[string]interface{})
+	providers := make([]map[string]interface{}, 0, len(c.providers))
 
 	totalActive := 0
 	totalIdle := 0
@@ -701,6 +788,7 @@ func (c *Client) Stats() *NNTPStats {
 		idle := len(pp.conns)
 		pp.mu.Unlock()
 
+		// Active = slots in use (tokens in the semaphore channel)
 		active := len(pp.slots)
 		maxC := pp.max
 
@@ -708,37 +796,40 @@ func (c *Client) Stats() *NNTPStats {
 		totalIdle += idle
 		totalMax += maxC
 
-		ps := NNTPProviderStats{
-			Host:           p.Host,
-			Port:           p.Port,
-			MaxConnections: maxC,
-			Active:         active,
-			Idle:           idle,
-			SSL:            p.SSL,
+		providerInfo := map[string]interface{}{
+			"host":            p.Host,
+			"port":            p.Port,
+			"max_connections": maxC,
+			"active":          active,
+			"idle":            idle,
+			"ssl":             p.SSL,
 		}
 
+		// Add speed test result if available
 		if result, ok := c.speedTestResults.Load(p.Host); ok {
-			ps.SpeedTest = &NNTPSpeedTestStats{
-				LatencyMs: result.LatencyMs,
-				SpeedMBps: result.SpeedMBps,
-				BytesRead: result.BytesRead,
-				TestedAt:  result.TestedAt.Format("2006-01-02T15:04:05Z07:00"),
-				Error:     result.Error,
+			providerInfo["speed_test"] = map[string]interface{}{
+				"latency_ms": result.LatencyMs,
+				"speed_mbps": result.SpeedMBps,
+				"bytes_read": result.BytesRead,
+				"tested_at":  result.TestedAt.Format("2006-01-02T15:04:05Z07:00"),
+				"error":      result.Error,
 			}
 		}
 
-		providers = append(providers, ps)
+		providers = append(providers, providerInfo)
 	}
 
-	return &NNTPStats{
-		Pool: NNTPPoolStats{
-			MaxConnections: totalMax,
-			TotalCreated:   totalActive + totalIdle,
-			Active:         totalActive,
-			Idle:           totalIdle,
-		},
-		Providers: providers,
+	poolStats := map[string]interface{}{
+		"max_connections": totalMax,
+		"total_created":   totalActive + totalIdle,
+		"active":          totalActive,
+		"idle":            totalIdle,
 	}
+
+	stats["pool"] = poolStats
+	stats["providers"] = providers
+
+	return stats
 }
 
 func (c *Client) Stat(ctx context.Context, messageID string) (int, string, error) {
@@ -935,9 +1026,15 @@ func (c *Client) Close() error {
 		}
 		pp.conns = nil
 		pp.mu.Unlock()
-		// Note: Active connections will be released when their operations complete
-		// and check c.closed in put(). No need to wake waiters since channel-based
-		// semaphore uses select with context support.
+
+		// Force-close active (checked-out) connections to unblock any in-flight operations.
+		// This causes StreamBody/sendCommand reads to fail immediately, allowing prefetch
+		// workers to exit and SegmentFetcher.Close() to complete without hanging.
+		pp.activeConns.Range(func(key, _ any) bool {
+			_ = key.(*Connection).Close()
+			totalClosed++
+			return true
+		})
 	}
 
 	c.logger.Info().
@@ -951,7 +1048,7 @@ func (c *Client) Close() error {
 func (c *Client) SpeedTest(ctx context.Context, providerHost string, messageID string) SpeedTestResult {
 	result := SpeedTestResult{
 		Provider: providerHost,
-		TestedAt: time.Now(),
+		TestedAt: utils.Now(),
 	}
 
 	// Find the provider by host
@@ -981,7 +1078,7 @@ func (c *Client) SpeedTest(ctx context.Context, providerHost string, messageID s
 	}(conn)
 
 	// Measure latency using ping (true network RTT)
-	pingStart := time.Now()
+	pingStart := utils.Now()
 	if err := conn.ping(); err != nil {
 		result.Error = fmt.Sprintf("ping failed: %v", err)
 		c.speedTestResults.Store(providerHost, result)
@@ -996,7 +1093,7 @@ func (c *Client) SpeedTest(ctx context.Context, providerHost string, messageID s
 	}
 
 	// Download the segment to measure actual speed
-	downloadStart := time.Now()
+	downloadStart := utils.Now()
 	data, err := conn.GetBody(messageID)
 	downloadDuration := time.Since(downloadStart)
 

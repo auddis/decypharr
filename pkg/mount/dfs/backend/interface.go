@@ -45,7 +45,6 @@ var registry = make(map[Type]Func)
 
 // Register registers a backend constructor function for a given type
 func Register(backendType Type, constructor Func) {
-	fmt.Println("Registering backend:", backendType)
 	registry[backendType] = constructor
 }
 

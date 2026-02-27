@@ -16,6 +16,7 @@ import (
 
 	"github.com/rs/zerolog"
 	nntpyenc "github.com/sirrobot01/decypharr/internal/nntp/yenc"
+	"github.com/sirrobot01/decypharr/internal/utils"
 )
 
 // Note: Timeout values are defined in TimeoutConfig (client.go)
@@ -108,12 +109,21 @@ func (c *Connection) startTLS() error {
 
 // ping sends a simple command to test the connection
 func (c *Connection) ping() error {
+	if c.conn == nil {
+		return NewConnectionError(errors.New("connection is nil"))
+	}
+	_ = c.conn.SetDeadline(utils.Now().Add(timeouts.PingTimeout))
+	defer func() { _ = c.conn.SetDeadline(time.Time{}) }()
+
 	if err := c.sendCommand("DATE"); err != nil {
 		return NewConnectionError(err)
 	}
-	_, err := c.readResponse()
+	resp, err := c.readResponse()
 	if err != nil {
 		return NewConnectionError(err)
+	}
+	if resp.Code != 111 {
+		return NewConnectionError(fmt.Errorf("unexpected DATE response: %d %s", resp.Code, resp.Message))
 	}
 	return nil
 }
@@ -208,7 +218,7 @@ func (c *Connection) GetHeader(messageID string, maxSnippet int) (*YencMetadata,
 	}
 
 	// Set read deadline to prevent hanging on stalled servers
-	_ = c.conn.SetReadDeadline(time.Now().Add(timeouts.StreamBodyTimeout))
+	_ = c.conn.SetReadDeadline(utils.Now().Add(timeouts.StreamBodyTimeout))
 	defer func() { _ = c.conn.SetReadDeadline(time.Time{}) }()
 
 	dec := nntpyenc.AcquireDecoder(c.reader)
@@ -258,7 +268,7 @@ func (c *Connection) GetBody(messageID string) ([]byte, error) {
 	}
 
 	// Set read deadline to prevent hanging on stalled servers
-	_ = c.conn.SetReadDeadline(time.Now().Add(timeouts.StreamBodyTimeout))
+	_ = c.conn.SetReadDeadline(utils.Now().Add(timeouts.StreamBodyTimeout))
 	defer func() { _ = c.conn.SetReadDeadline(time.Time{}) }()
 
 	return c.readDotBytes()
@@ -283,7 +293,7 @@ func (c *Connection) GetDecodedBody(messageID string) ([]byte, error) {
 	}
 
 	// Set read deadline to prevent hanging on stalled servers
-	_ = c.conn.SetReadDeadline(time.Now().Add(timeouts.StreamBodyTimeout))
+	_ = c.conn.SetReadDeadline(utils.Now().Add(timeouts.StreamBodyTimeout))
 	defer func() { _ = c.conn.SetReadDeadline(time.Time{}) }()
 
 	dec := nntpyenc.AcquireDecoder(c.reader)
@@ -318,7 +328,7 @@ func (c *Connection) StreamBody(messageID string, w io.Writer) (int64, error) {
 	}
 
 	// Set read deadline to prevent hanging if server stops sending
-	_ = c.conn.SetReadDeadline(time.Now().Add(timeouts.StreamBodyTimeout))
+	_ = c.conn.SetReadDeadline(utils.Now().Add(timeouts.StreamBodyTimeout))
 	defer func() { _ = c.conn.SetReadDeadline(time.Time{}) }() // Clear deadline
 
 	dec := nntpyenc.AcquireDecoder(c.reader)
@@ -384,7 +394,7 @@ func (c *Connection) GetHead(messageID string) ([]byte, error) {
 }
 
 func (c *Connection) Post(messageID, filename string, body []byte) error {
-	now := time.Now().Format("2006-01-02 15:04:05")
+	now := utils.Now().Format("2006-01-02 15:04:05")
 	if err := c.sendCommand("POST"); err != nil {
 		return NewConnectionError(fmt.Errorf("failed to send POST command: %w", err))
 	}

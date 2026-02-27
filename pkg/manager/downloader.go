@@ -196,11 +196,15 @@ func (d *Downloader) processSymlink(entry *storage.Entry, mountPath string) erro
 
 	// Run ffprobe on files to warm cache and trigger imports
 	if !d.manager.config.SkipPreCache && len(filePaths) > 0 {
-		d.logger.Debug().Msgf("Running ffprobe on %s", entry.Name)
-		if err := d.manager.RunFFprobe(filePaths); err != nil {
+		probeFiles := filePaths
+		if len(probeFiles) > MaxNZBPreCacheFiles {
+			probeFiles = probeFiles[:MaxNZBPreCacheFiles]
+		}
+		d.logger.Debug().Int("files", len(probeFiles)).Msgf("Running ffprobe on %s", entry.Name)
+		if err := d.manager.RunFFprobe(probeFiles); err != nil {
 			d.logger.Error().Msgf("Failed to run ffprobe: %s", err)
 		} else {
-			d.logger.Debug().Str("entry", entry.Name).Msgf("Ran ffprobe on %d files", len(filePaths))
+			d.logger.Debug().Str("entry", entry.Name).Msgf("Ran ffprobe on %d/%d files", len(probeFiles), len(filePaths))
 		}
 	}
 

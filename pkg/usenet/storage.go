@@ -189,33 +189,29 @@ func (s *NZBStorage) Count() (int, error) {
 	return len(ids), nil
 }
 
-// NZBStorageStats holds NZB storage statistics.
-type NZBStorageStats struct {
-	Count      int    `json:"count"`
-	TotalBytes int64  `json:"total_bytes"`
-	MetaDir    string `json:"meta_dir"`
-}
+// Stats returns storage statistics
+func (s *NZBStorage) Stats() map[string]interface{} {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 
-// Stats returns storage statistics.
-func (s *NZBStorage) Stats() NZBStorageStats {
-	count, _ := s.Count()
-
-	var totalSize int64
 	entries, _ := os.ReadDir(s.metaDir)
+
+	var count int
+	var totalSize int64
 	for _, entry := range entries {
 		if entry.IsDir() || filepath.Ext(entry.Name()) != metaFileExtension {
 			continue
 		}
-		info, err := entry.Info()
-		if err == nil {
+		count++
+		if info, err := entry.Info(); err == nil {
 			totalSize += info.Size()
 		}
 	}
 
-	return NZBStorageStats{
-		Count:      count,
-		TotalBytes: totalSize,
-		MetaDir:    s.metaDir,
+	return map[string]interface{}{
+		"count":       count,
+		"total_bytes": totalSize,
+		"meta_dir":    s.metaDir,
 	}
 }
 

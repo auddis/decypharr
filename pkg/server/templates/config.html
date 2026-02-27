@@ -237,7 +237,7 @@
                                 <span class="text-lg font-semibold"><i class="bi bi-download mr-3 text-info"></i>Downloader</span>
                             </div>
 
-                            <div class="grid grid-cols-1 lg:grid-cols-4 gap-4" id="downloaderSection">
+                            <div class="grid grid-cols-1 lg:grid-cols-2 gap-4" id="downloaderSection">
                                 <div>
                                     <label class="label" for="default_download_action">
                                         <span class="font-medium">Default Download Action</span>
@@ -257,14 +257,6 @@
                                     <input type="number" class="input w-full downloader-option" name="max_downloads"
                                            id="max_downloads" min="0" disabled>
                                     <span class="text-sm opacity-70">Max simultaneous downloads (0 = unlimited)</span>
-                                </div>
-                                <div>
-                                    <label class="label" for="download_connections">
-                                        <span class="font-medium">Connections per Download</span>
-                                    </label>
-                                    <input type="number" class="input w-full downloader-option" name="download_connections"
-                                           id="download_connections" min="1" max="64" placeholder="16" disabled>
-                                    <span class="text-sm opacity-70">Number of parallel connections per file</span>
                                 </div>
                             </div>
 

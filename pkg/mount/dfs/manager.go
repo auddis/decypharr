@@ -109,29 +109,23 @@ func (m *Manager) Refresh(dirs []string) error {
 	return nil
 }
 
-// Stats returns unified mount statistics
-func (m *Manager) Stats() *manager.MountStats {
-	ms := &manager.MountStats{
-		Enabled: true,
-		Ready:   m.ready.Load(),
-		Type:    m.Type(),
-	}
-	ms.DFS = m.dfsDetail()
-	return ms
-}
-
-func (m *Manager) dfsDetail() *manager.DFSDetail {
-	d := &manager.DFSDetail{
-		Backend: string(m.defaultBackendType),
-		Ready:   m.ready.Load(),
-	}
-	if m.config != nil {
-		d.MountPath = m.config.MountPath
+// Stats returns unified statistics across all DFS mounts
+func (m *Manager) Stats() map[string]interface{} {
+	// Aggregate stats from all mounts
+	stats := map[string]interface{}{
+		"enabled": true,
+		"ready":   m.ready.Load(),
+		"type":    m.Type(),
+		"backend": string(m.defaultBackendType),
 	}
 	if m.vfs != nil {
-		d.VFS = m.vfs.Stats()
+		if m.vfs != nil {
+			for key, value := range m.vfs.GetStats() {
+				stats[key] = value
+			}
+		}
 	}
-	return d
+	return stats
 }
 
 func (m *Manager) Type() string {

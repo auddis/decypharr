@@ -296,7 +296,7 @@
             const mountContent = document.getElementById('mount-content');
             const rcloneLogsBtn = document.getElementById('rclone-logs-btn');
 
-            // Determine mount type
+            // Determine mount type (rclone, dfs, or external)
             let type = 'None';
 
             if (mountData && mountData.type === "rclone" && mountData.enabled) {
@@ -320,7 +320,7 @@
                 return;
             }
 
-            // For DFS mount — stats are in mount.dfs
+            // For DFS mount
             if (type === 'DFS') {
                 updateDFSStats(mountData, mountStatus, mountContent);
                 return;
@@ -337,14 +337,11 @@
             mountStatus.textContent = 'Active';
             mountStatus.className = 'badge badge-success';
 
-            // rclone stats are in mount.rclone, external in mount.external
-            const rcloneData = mountData.rclone || mountData.external || {};
-            updateRcloneStats(rcloneData, mountContent);
+            updateRcloneStats(mountData.detail || {}, mountContent);
         }
 
         function updateDFSStats(data, statusEl, contentEl) {
-            const dfs = data.dfs;
-            if (!data.ready || !dfs) {
+            if (!data.ready) {
                 statusEl.textContent = 'Not Ready';
                 statusEl.className = 'badge badge-warning';
                 contentEl.innerHTML = '<p class="text-base-content/70">DFS filesystem is not ready.</p>';
@@ -354,15 +351,15 @@
             statusEl.textContent = 'Active';
             statusEl.className = 'badge badge-success';
 
-            const vfsStats = dfs.vfs || {};
-            const cache = vfsStats.cache || {};
-            const activeFiles = vfsStats.active_files || 0;
-            const totalFiles = vfsStats.total_files || 0;
-            const cacheItems = cache.item_count || 0;
-            const cacheTotalSize = cache.total_size || 0;
-            const cacheMaxSize = cache.max_size || 0;
-            const cacheUtilizationValue = cache.utilization != null
-                ? cache.utilization
+            const detail = data.detail || {};
+            const activeFiles = detail.active_files || 0;
+            const totalFiles = detail.total_files || 0;
+            const cacheItems = detail.cache_item_count || 0;
+            const cacheTotalSize = detail.cache_total_size || 0;
+            const cacheMaxSize = detail.cache_max_size || 0;
+            const cacheType = (detail.cache_type || 'vfs').toUpperCase();
+            const cacheUtilizationValue = detail.cache_utilization != null
+                ? detail.cache_utilization
                 : (cacheMaxSize > 0 ? cacheTotalSize / cacheMaxSize : 0);
             const cacheUtilizationPercent = (cacheUtilizationValue * 100).toFixed(1);
             const cacheUsageNumber = Number(cacheUtilizationPercent);
@@ -370,42 +367,80 @@
                 : cacheUsageNumber > 75 ? 'text-warning'
                     : 'text-success';
 
+            // New stats
+            const activeDownloads = detail.cache_active_downloads || 0;
+            const downloadSpeed = detail.cache_download_speed || 0;
+            const totalDownloaded = detail.cache_total_downloaded || 0;
+            const cacheHits = detail.cache_cache_hits || 0;
+            const cacheMisses = detail.cache_cache_misses || 0;
+            const cacheHitRate = detail.cache_cache_hit_rate != null ? detail.cache_cache_hit_rate : 0;
+            const hitRatePercent = (cacheHitRate * 100).toFixed(1);
+            const hitRateClass = cacheHitRate > 0.8 ? 'text-success'
+                : cacheHitRate > 0.5 ? 'text-warning'
+                    : cacheHits + cacheMisses === 0 ? 'text-base-content/50' : 'text-error';
+            const circuitBreakers = detail.cache_circuit_breakers || 0;
+
             let html = `
                 <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
                     <div class="stat">
-                        <div class="stat-title">Active Files</div>
-                        <div class="stat-value text-primary">${formatNumber(activeFiles)}</div>
-                        <div class="stat-desc">Total tracked: ${formatNumber(totalFiles)}</div>
+                        <div class="stat-figure text-primary">
+                            <i class="bi bi-download text-2xl"></i>
+                        </div>
+                        <div class="stat-title">Active Downloads</div>
+                        <div class="stat-value text-primary">${formatNumber(activeDownloads)}</div>
+                        <div class="stat-desc">${activeDownloads > 0 ? '<span class="text-success">● Downloading</span>' : 'Idle'}</div>
                     </div>
                     <div class="stat">
+                        <div class="stat-figure text-info">
+                            <i class="bi bi-speedometer2 text-2xl"></i>
+                        </div>
+                        <div class="stat-title">Download Speed</div>
+                        <div class="stat-value text-info">${window.decypharrUtils.formatBytes(downloadSpeed)}/s</div>
+                        <div class="stat-desc">Total: ${window.decypharrUtils.formatBytes(totalDownloaded)}</div>
+                    </div>
+                    <div class="stat">
+                        <div class="stat-figure ${hitRateClass}">
+                            <i class="bi bi-bullseye text-2xl"></i>
+                        </div>
+                        <div class="stat-title">Cache Hit Rate</div>
+                        <div class="stat-value ${hitRateClass}">${hitRatePercent}%</div>
+                        <div class="stat-desc">${formatNumber(cacheHits)} hits / ${formatNumber(cacheMisses)} misses</div>
+                    </div>
+                    <div class="stat">
+                        <div class="stat-title">Active Files</div>
+                        <div class="stat-value text-secondary">${formatNumber(activeFiles)}</div>
+                        <div class="stat-desc">Total tracked: ${formatNumber(totalFiles)}</div>
+                    </div>
+                </div>
+
+                <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 mt-4">
+                    <div class="stat">
                         <div class="stat-title">Cache Items</div>
-                        <div class="stat-value text-secondary">${formatNumber(cacheItems)}</div>
-                        <div class="stat-desc">VFS cache</div>
+                        <div class="stat-value text-sm">${formatNumber(cacheItems)}</div>
+                        <div class="stat-desc">${cacheType} cache</div>
                     </div>
                     <div class="stat">
                         <div class="stat-title">Cache Utilization</div>
-                        <div class="stat-value ${cacheUsageTextClass}">${cacheUtilizationPercent}%</div>
+                        <div class="stat-value text-sm ${cacheUsageTextClass}">${cacheUtilizationPercent}%</div>
                         <div class="stat-desc">${window.decypharrUtils.formatBytes(cacheTotalSize)} / ${window.decypharrUtils.formatBytes(cacheMaxSize)}</div>
                     </div>
-                    <div class="stat">
-                        <div class="stat-title">Backend</div>
-                        <div class="stat-value text-info text-lg">${(dfs.backend || 'unknown').toUpperCase()}</div>
-                        <div class="stat-desc">${dfs.mount_path || '-'}</div>
-                    </div>
-                </div>
-                <div class="grid grid-cols-2 gap-3 mt-4">
-                    <div class="stat bg-base-200 rounded-lg p-3">
-                        <div class="stat-title text-xs">Total Downloaded</div>
-                        <div class="stat-value text-sm">${window.decypharrUtils.formatBytes(vfsStats.total_bytes_read || 0)}</div>
-                        <div class="stat-desc">Since service start</div>
-                    </div>
-                    <div class="stat bg-base-200 rounded-lg p-3">
-                        <div class="stat-title text-xs">Download Errors</div>
-                        <div class="stat-value text-sm ${(vfsStats.total_errors || 0) > 0 ? 'text-error' : 'text-success'}">${formatNumber(vfsStats.total_errors || 0)}</div>
-                        <div class="stat-desc">Since service start</div>
-                    </div>
-                </div>
             `;
+
+            // Show circuit breaker warning if any are tripped
+            if (circuitBreakers > 0) {
+                html += `
+                    <div class="stat">
+                        <div class="stat-figure text-error">
+                            <i class="bi bi-exclamation-triangle text-2xl"></i>
+                        </div>
+                        <div class="stat-title">Circuit Breakers</div>
+                        <div class="stat-value text-error">${circuitBreakers}</div>
+                        <div class="stat-desc text-error">Downloads paused (cooldown)</div>
+                    </div>
+                `;
+            }
+
+            html += '</div>';
 
             contentEl.innerHTML = html;
         }
@@ -818,10 +853,7 @@
                                             <span class="font-medium text-xs">${provider.host}</span>
                                             <span class="badge ${provider.ssl ? 'badge-success' : 'badge-warning'} badge-xs">${provider.ssl ? 'SSL' : 'Plain'}</span>
                                         </div>
-                                        <p class="text-xs text-base-content/70">
-                                            <span class="${provider.active > 0 ? 'text-success font-bold' : ''}">${provider.active || 0}</span>
-                                            / ${provider.max_connections || 0} connections
-                                        </p>
+                                        <p class="text-xs text-base-content/70">${provider.max_connections || 0} connections</p>
                                     </div>
                                     <div class="flex flex-col items-end gap-1">
                                         ${speedResultHtml}

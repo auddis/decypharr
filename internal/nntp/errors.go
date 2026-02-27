@@ -145,8 +145,11 @@ func classifyNNTPError(code int, message string) *Error {
 		return &Error{Type: ErrorTypeArticleNotFound, Code: code, Message: message}
 	case code == 411:
 		return &Error{Type: ErrorTypeGroupNotFound, Code: code, Message: message}
-	case code == 502 || code == 503:
+	case code == 502:
 		return &Error{Type: ErrorTypePermissionDenied, Code: code, Message: message}
+	case code == 503:
+		// 503 = "Service temporarily unavailable" — transient, not a permission failure
+		return &Error{Type: ErrorTypeServerBusy, Code: code, Message: message}
 	case code == 481 || code == 482:
 		return &Error{Type: ErrorTypeAuthentication, Code: code, Message: message}
 	case code == 400:

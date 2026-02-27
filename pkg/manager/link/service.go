@@ -116,7 +116,17 @@ func (s *Service) fetchAndValidate(ctx context.Context, entry *storage.Entry, fi
 		// Handle link error categories
 		if linkErr := GetLinkError(validationErr); linkErr != nil {
 			if linkErr.ShouldDisableAccount() {
-				s.disableLinkAccount(link, linkErr)
+				if err := s.disableLinkAccount(link, linkErr); err != nil {
+					s.logger.Error().
+						Err(err).
+						Str("debrid", link.Debrid).
+						Str("token", utils.Mask(link.Token)).
+						Str("reason", linkErr.Code).
+						Msg("Failed to disable account after link error")
+				} else {
+					// This will use the next available account and fetch a new link, so we need to refetch and revalidate
+					return s.fetchAndValidate(ctx, entry, filename)
+				}
 			} else if linkErr.ShouldRefetch() {
 				// Invalidate and refetch
 				return s.invalidateAndRefetch(ctx, entry, link)
@@ -333,38 +343,33 @@ func (s *Service) validateLink(ctx context.Context, link *types.DownloadLink) er
 }
 
 // disableLinkAccount handles errors that require disabling an account
-func (s *Service) disableLinkAccount(link types.DownloadLink, linkErr *Error) {
+func (s *Service) disableLinkAccount(link types.DownloadLink, linkErr *Error) error {
 	client, err := s.getClient(link.Debrid)
 	if err != nil {
-		s.logger.Error().
-			Str("debrid", link.Debrid).
-			Msg("Failed to get client to disable account")
-		return
+		return fmt.Errorf("failed to get client for debrid %s: %w", link.Debrid, err)
 	}
 
 	accountManager := client.AccountManager()
 	account, err := accountManager.GetAccount(link.Token)
 	if err != nil {
-		s.logger.Error().
-			Err(err).
-			Str("token", utils.Mask(link.Token)).
-			Msg("Failed to get account to disable")
-		return
+		return fmt.Errorf("failed to get account for token %s: %w", utils.Mask(link.Token), err)
 	}
 
 	if account == nil {
-		s.logger.Error().
-			Str("token", utils.Mask(link.Token)).
-			Msg("Account not found to disable")
-		return
+		return fmt.Errorf("account not found for token %s", utils.Mask(link.Token))
 	}
 
 	accountManager.Disable(account)
+
+	// Remove all validations for all the links
+	s.validated.Clear()
 	s.logger.Warn().
 		Str("debrid", link.Debrid).
-		Str("token", utils.Mask(link.Token)).
+		Str("token", utils.Mask(account.Token)).
+		Str("account", utils.Mask(account.Username)).
 		Str("reason", linkErr.Code).
 		Msg("Disabled account due to error")
+	return nil
 }
 
 // invalidateAndRefetch removes a link from both validation tracking and account cache
@@ -373,7 +378,7 @@ func (s *Service) invalidateAndRefetch(ctx context.Context, entry *storage.Entry
 	s.validated.Delete(link.DownloadLink)
 
 	// Remove from account cache
-	if link.Debrid == "" || link.Token == "" {
+	if link.Debrid == "" {
 		return emptyDownloadLink, fmt.Errorf("invalid link")
 	}
 

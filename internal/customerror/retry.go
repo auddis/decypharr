@@ -74,6 +74,17 @@ func IsRetriableError(err error) bool {
 		return false
 	}
 
+	// Ask the error itself whether it is retriable. This covers types like
+	// *nntp.Error that carry their own retryability knowledge but are not
+	// *customerror.Error. We intentionally place this after the *Error check
+	// so the explicit permanent/retry flags above always win for our own type.
+	type selfRetryable interface {
+		IsRetryable() bool
+	}
+	if r, ok := err.(selfRetryable); ok {
+		return r.IsRetryable()
+	}
+
 	// Check for explicit non-retriable markers first
 	if IsPermanentError(err) {
 		return false
@@ -92,6 +103,12 @@ func IsRetriableError(err error) bool {
 	// io.EOF at expected position is not an error
 	// io.ErrUnexpectedEOF during transfer is retriable
 	if errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+
+	// io.ErrClosedPipe means the underlying pipe/connection was closed mid-transfer.
+	// This is transient (the remote end reset) and should be retried like EPIPE.
+	if errors.Is(err, io.ErrClosedPipe) {
 		return true
 	}
 

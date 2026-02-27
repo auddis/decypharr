@@ -100,7 +100,8 @@ func FromError(err error) *Error {
 
 func IsSilentError(err error) bool {
 	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) ||
-		errors.Is(err, net.ErrClosed) || errors.Is(err, syscall.ECONNABORTED) || errors.Is(err, http.ErrHandlerTimeout) {
+		errors.Is(err, net.ErrClosed) || errors.Is(err, syscall.ECONNABORTED) || errors.Is(err, http.ErrHandlerTimeout) ||
+		errors.Is(err, io.ErrClosedPipe) {
 		return true
 	}
 	var netErr *net.OpError

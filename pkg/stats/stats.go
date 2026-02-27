@@ -34,21 +34,22 @@ type Collector struct {
 	cancel context.CancelFunc
 }
 
-// New creates a Collector. Call Start() to begin background collection.
+// New creates a Collector and starts the background refresh goroutine.
 func New(mgr *manager.Manager) *Collector {
-	return &Collector{
+	c := &Collector{
 		mgr:          mgr,
 		logger:       logger.New("stats"),
-		snapshot:     &Snapshot{}, // empty until first background collect
 		profileCache: make(map[string]*debridTypes.Profile),
 		profileTTL:   60 * time.Second,
 	}
+	// Build an initial snapshot synchronously so the first request is served immediately.
+	c.snapshot = c.collect()
+	return c
 }
 
-// Start begins the background refresh loop. Collects immediately, then every 5s.
+// Start begins the background refresh loop. Call from server startup.
 func (c *Collector) Start(ctx context.Context) {
 	ctx, c.cancel = context.WithCancel(ctx)
-	// First collection in background — doesn't block startup
 	go c.loop(ctx)
 }
 
@@ -76,12 +77,6 @@ func (c *Collector) Handler() http.HandlerFunc {
 
 // loop refreshes the snapshot on a timer.
 func (c *Collector) loop(ctx context.Context) {
-	// Collect immediately so stats are available ASAP after startup
-	snap := c.collect()
-	c.mu.Lock()
-	c.snapshot = snap
-	c.mu.Unlock()
-
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -153,7 +148,7 @@ func (c *Collector) collect() *Snapshot {
 
 	// --- Queue ---
 	snap.Queue = QueueStats{
-		Pending: c.mgr.Queue().RequestsSize(),
+		Pending: c.mgr.JobQueue().Len(),
 	}
 
 	// --- Arrs ---
@@ -264,12 +259,31 @@ func (c *Collector) getProfiles() map[string]*debridTypes.Profile {
 }
 
 // collectMount gathers mount stats.
-func (c *Collector) collectMount(cfg *config.Config) *manager.MountStats {
+func (c *Collector) collectMount(cfg *config.Config) MountStats {
 	mountMgr := c.mgr.MountManager()
-	if mountMgr == nil {
-		return &manager.MountStats{
-			Enabled: cfg.Mount.Type != config.MountTypeNone,
+	enabled := cfg.Mount.Type != config.MountTypeNone
+
+	if mountMgr == nil || !mountMgr.IsReady() {
+		return MountStats{
+			Ready:   false,
+			Enabled: enabled,
 		}
 	}
-	return mountMgr.Stats()
+
+	mountStats := mountMgr.Stats()
+	if mountStats == nil {
+		return MountStats{
+			Ready:   true,
+			Enabled: enabled,
+			Type:    mountMgr.Type(),
+			Error:   "failed to get mount stats",
+		}
+	}
+
+	return MountStats{
+		Ready:   true,
+		Enabled: enabled,
+		Type:    mountMgr.Type(),
+		Detail:  mountStats,
+	}
 }

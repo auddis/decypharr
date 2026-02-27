@@ -131,7 +131,7 @@ func ErrorCodeToLinkError(code string) *Error {
 	switch code {
 	case "link_not_found":
 		return NewPermanentError(ErrLinkNotFound, code)
-	case "bandwidth_exceeded":
+	case "bandwidth_exceeded", "quota_exceeded", "daily_limit_exceeded", "bytes_limit_reached":
 		return NewAccountError(ErrBandwidthExceeded, code)
 	case "link_expired":
 		return NewRefetchableError(ErrLinkExpired, code)

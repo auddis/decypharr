@@ -25,17 +25,6 @@ type RateLimitedLogger struct {
 
 type Options func(*RateLimitedLogger)
 
-func WithWindow(d time.Duration) Options {
-	return func(r *RateLimitedLogger) {
-		r.window = d
-	}
-}
-
-func WithMaxItems(n int) Options {
-	return func(r *RateLimitedLogger) {
-		r.maxItems = n
-	}
-}
 
 func WithLogger(logger zerolog.Logger) Options {
 	return func(r *RateLimitedLogger) {
@@ -59,14 +48,15 @@ func NewRateLimitedLogger(opts ...Options) *RateLimitedLogger {
 // shouldLog returns true if this key should be logged (not seen recently).
 // Thread-safe.
 func (r *RateLimitedLogger) shouldLog(key string) bool {
-	now := time.Now()
-
 	// Check if seen recently
 	if lastSeen, ok := r.seen.Load(key); ok {
+		now := time.Now()
 		if now.Sub(lastSeen) < r.window {
 			return false // Suppress
 		}
 	}
+
+	now := time.Now()
 
 	// Evict old entries if map is too large
 	if r.seen.Size() >= r.maxItems {

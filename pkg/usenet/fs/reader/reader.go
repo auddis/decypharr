@@ -145,13 +145,7 @@ func NewStreamingReaderWithEncryption(
 	return sr, nil
 }
 
-// WithLogger sets the logger for the reader.
-func WithLogger(logger zerolog.Logger) Option {
-	return func(c *Config) {
-		// Logger is stored separately, but we can use this pattern
-		// for other config that needs to be passed through
-	}
-}
+
 
 // ReadAt implements io.ReaderAt with blocking semantics.
 // Blocks until the requested byte range is available.

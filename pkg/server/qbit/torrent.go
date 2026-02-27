@@ -22,9 +22,12 @@ func (q *QBit) addMagnet(ctx context.Context, url string, arr *arr.Arr, debrid s
 	}
 
 	importReq := manager.NewTorrentRequest(debrid, q.downloadFolder, magnet, arr, action, arr.DownloadUncached, callbackURL, manager.ImportTypeQBit, skipMultiSeason)
-
-	err = q.manager.AddNewTorrent(ctx, importReq)
-	if err != nil {
+	job := manager.NewJob(manager.JobTypeTorrent, importReq)
+	if err := q.manager.SubmitJob(job); err != nil {
+		return fmt.Errorf("failed to submit torrent job: %w", err)
+	}
+	// Wait for the job to complete (sync behavior expected by Arrs)
+	if err := job.Wait(ctx); err != nil {
 		return fmt.Errorf("failed to process torrent: %w", err)
 	}
 	return nil
@@ -39,8 +42,11 @@ func (q *QBit) addTorrent(ctx context.Context, fileHeader *multipart.FileHeader,
 		return fmt.Errorf("error reading file: %s \n %w", fileHeader.Filename, err)
 	}
 	importReq := manager.NewTorrentRequest(debrid, q.downloadFolder, magnet, arr, action, arr.DownloadUncached, callbackURL, manager.ImportTypeQBit, skipMultiSeason)
-	err = q.manager.AddNewTorrent(ctx, importReq)
-	if err != nil {
+	job := manager.NewJob(manager.JobTypeTorrent, importReq)
+	if err := q.manager.SubmitJob(job); err != nil {
+		return fmt.Errorf("failed to submit torrent job: %w", err)
+	}
+	if err := job.Wait(ctx); err != nil {
 		return fmt.Errorf("failed to process torrent: %w", err)
 	}
 	return nil

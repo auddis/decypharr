@@ -163,7 +163,12 @@ func (s *Server) handleAddContent(w http.ResponseWriter, r *http.Request) {
 
 		case "torrent":
 			importReq := manager.NewTorrentRequest(debridName, downloadFolder, task.magnet, _arr, config.DownloadAction(action), downloadUncached, callbackUrl, manager.ImportTypeAPI, skipMultiSeason)
-			if err := s.manager.AddNewTorrent(ctx, importReq); err != nil {
+			job := manager.NewJob(manager.JobTypeTorrent, importReq)
+			if err := s.manager.SubmitJob(job); err != nil {
+				s.logger.Error().Err(err).Str("source", task.source).Msg("Failed to submit torrent job")
+				importReq.Error = err.Error()
+				importReq.Status = "error"
+			} else if err := job.Wait(ctx); err != nil {
 				s.logger.Error().Err(err).Str("source", task.source).Msg("Failed to add torrent")
 				importReq.Error = err.Error()
 				importReq.Status = "error"
@@ -172,13 +177,16 @@ func (s *Server) handleAddContent(w http.ResponseWriter, r *http.Request) {
 
 		case "nzb":
 			importReq := manager.NewNZBRequest(task.name, downloadFolder, task.nzbContent, _arr, config.DownloadAction(action), callbackUrl, manager.ImportTypeAPI, skipMultiSeason)
-			nzoID, err := s.manager.AddNewNZB(ctx, importReq)
-			if err != nil {
+			job := manager.NewJob(manager.JobTypeNZB, importReq)
+			if err := s.manager.SubmitJob(job); err != nil {
+				s.logger.Error().Err(err).Str("source", task.source).Msg("Failed to submit NZB job")
+				importReq.Error = err.Error()
+				importReq.Status = "error"
+			} else if err := job.Wait(ctx); err != nil {
 				s.logger.Error().Err(err).Str("source", task.source).Msg("Failed to add NZB")
 				importReq.Error = err.Error()
 				importReq.Status = "error"
 			}
-			importReq.Id = nzoID
 			return importReq
 
 		default:

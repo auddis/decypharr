@@ -70,7 +70,7 @@ func (b *Backend) Mount(ctx context.Context) error {
 
 	_ = os.MkdirAll(b.config.MountPath, 0755)
 	// Try to unmount if already mounted
-	b.forceUnmount()
+	b.forceUnmount(ctx)
 
 	mountOpt := fuse.MountOptions{
 		FsName:               "decypharr",
@@ -180,7 +180,7 @@ func (b *Backend) Mount(ctx context.Context) error {
 			// Check if still mounted
 			if _, err := os.Stat(b.config.MountPath); err == nil {
 				b.logger.Warn().Msg("FUSE filesystem still mounted, attempting force unmount")
-				b.forceUnmount()
+				b.forceUnmount(ctx)
 			}
 
 			close(done)
@@ -192,7 +192,7 @@ func (b *Backend) Mount(ctx context.Context) error {
 			b.logger.Info().Msg("Filesystem unmounted successfully")
 		case <-ctx.Done():
 			b.logger.Warn().Err(ctx.Err()).Msg("Unmount timed out, forcing unmount")
-			b.forceUnmount()
+			b.forceUnmount(ctx)
 		}
 	}
 
@@ -208,7 +208,7 @@ func (b *Backend) Unmount(ctx context.Context) error {
 		b.unmountFunc(ctx)
 	} else {
 		// Use force unmount
-		b.forceUnmount()
+		b.forceUnmount(ctx)
 	}
 
 	// Close VFS manager
@@ -249,7 +249,7 @@ func (b *Backend) Refresh(dir string) {
 }
 
 // forceUnmount attempts to force unmount a path using system commands
-func (b *Backend) forceUnmount() {
+func (b *Backend) forceUnmount(ctx context.Context) {
 	methods := [][]string{
 		{"umount", b.config.MountPath},
 		{"umount", "-l", b.config.MountPath}, // lazy unmount
@@ -257,7 +257,7 @@ func (b *Backend) forceUnmount() {
 		{"fusermount3", "-uz", b.config.MountPath},
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
 	for _, method := range methods {

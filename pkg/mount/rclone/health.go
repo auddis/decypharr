@@ -7,7 +7,7 @@ import (
 )
 
 // RecoverMount attempts to recover a failed mount
-func (m *Manager) RecoverMount() error {
+func (m *Manager) RecoverMount(ctx context.Context) error {
 	mountInfo := m.getMountInfo()
 
 	if mountInfo == nil {
@@ -17,7 +17,7 @@ func (m *Manager) RecoverMount() error {
 	m.logger.Warn().Msg("Attempting to recover mount")
 
 	// First try to unmount cleanly
-	m.unmount()
+	m.unmount(ctx)
 
 	// Wait a moment
 	time.Sleep(1 * time.Second)
@@ -63,7 +63,7 @@ func (m *Manager) performMountHealthCheck() {
 
 		// Attempt recovery
 		go func() {
-			if err := m.RecoverMount(); err != nil {
+			if err := m.RecoverMount(m.ctx); err != nil {
 				m.logger.Error().Msg("Failed to recover mount")
 			}
 		}()

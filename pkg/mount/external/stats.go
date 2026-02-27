@@ -3,8 +3,9 @@ package external
 import (
 	"context"
 
+	json "github.com/bytedance/sonic"
+
 	"github.com/sirrobot01/decypharr/internal/rclone"
-	"github.com/sirrobot01/decypharr/pkg/manager"
 )
 
 // Stats represents rclone statistics
@@ -18,38 +19,46 @@ type Stats struct {
 	Version   rclone.VersionResponse   `json:"version"`
 }
 
-// Stats returns unified mount statistics
-func (m *Manager) Stats() *manager.MountStats {
-	ms := &manager.MountStats{
-		Enabled: true,
-		Ready:   m.IsReady(),
-		Type:    m.Type(),
-	}
-
+// Stats retrieves statistics from the rclone RC server
+func (m *Manager) Stats() map[string]interface{} {
+	empty := make(map[string]interface{})
+	stats := &Stats{}
+	stats.Ready = m.IsReady()
+	stats.Enabled = true
+	stats.Type = m.Type()
 	ctx := context.Background()
-
-	detail := &manager.RcloneDetail{}
 
 	coreStats, err := m.client.GetCoreStats(ctx)
 	if err == nil {
-		detail.Core = *coreStats
+		stats.Core = *coreStats
 	}
 
+	// GetReader memory usage
 	memStats, err := m.client.GetMemoryUsage(ctx)
 	if err == nil {
-		detail.Memory = *memStats
+		stats.Memory = *memStats
 	}
-
+	// GetReader bandwidth stats
 	bwStats, err := m.client.GetBandwidthStats(ctx)
 	if err == nil && bwStats != nil {
-		detail.Bandwidth = *bwStats
+		stats.Bandwidth = *bwStats
 	}
 
+	// GetReader version info
 	versionResp, err := m.client.GetVersion(ctx)
 	if err == nil {
-		detail.Version = *versionResp
+		stats.Version = *versionResp
 	}
 
-	ms.External = detail
-	return ms
+	// Convert to map[string]interface{}
+	statsMap := make(map[string]interface{})
+	data, err := json.Marshal(stats)
+	if err != nil {
+		return empty
+	}
+	if err := json.Unmarshal(data, &statsMap); err != nil {
+		return empty
+	}
+
+	return statsMap
 }

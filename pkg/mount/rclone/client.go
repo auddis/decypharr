@@ -15,10 +15,10 @@ import (
 )
 
 // mountWithRetry attempts to mount with retry logic using avast/retry-go
-func (m *Manager) mountWithRetry(maxRetries int) error {
+func (m *Manager) mountWithRetry(ctx context.Context, maxRetries int) error {
 	return retry.Do(
 		func() error {
-			return m.performMount()
+			return m.performMount(ctx)
 		},
 		retry.Attempts(uint(maxRetries)+1),
 		retry.Delay(config.DefaultRetryDelay),
@@ -31,7 +31,7 @@ func (m *Manager) mountWithRetry(maxRetries int) error {
 }
 
 // performMount performs a single mount attempt
-func (m *Manager) performMount() error {
+func (m *Manager) performMount(ctx context.Context) error {
 	cfg := config.Get().Mount
 
 	// Create mount directory if not on windows
@@ -49,7 +49,7 @@ func (m *Manager) performMount() error {
 
 	// Clean up any stale mount first
 	if mountInfo != nil && !mountInfo.Mounted {
-		err := m.forceUnmount()
+		err := m.forceUnmount(ctx)
 		if err != nil {
 			return err
 		}
@@ -171,8 +171,8 @@ func (m *Manager) performMount() error {
 	mountArgs["vfsOpt"] = vfsOpt
 	mountArgs["mountOpt"] = mountOpt
 
-	if err := m.client.Mount(context.Background(), mountArgs); err != nil {
-		_ = m.forceUnmount()
+	if err := m.client.Mount(ctx, mountArgs); err != nil {
+		_ = m.forceUnmount(ctx)
 		return fmt.Errorf("failed to mount %s via RC: %w", cfg.MountPath, err)
 	}
 
@@ -191,7 +191,7 @@ func (m *Manager) performMount() error {
 }
 
 // unmount is the internal unmount function
-func (m *Manager) unmount() {
+func (m *Manager) unmount(ctx context.Context) {
 	mountInfo := m.getMountInfo()
 
 	if mountInfo == nil || !mountInfo.Mounted {
@@ -208,7 +208,7 @@ func (m *Manager) unmount() {
 	// If RC unmount fails or server is not ready, try force unmount
 	if err != nil {
 		m.logger.Warn().Err(err).Msg("RC unmount failed, trying force unmount")
-		if err := m.forceUnmount(); err != nil {
+		if err := m.forceUnmount(ctx); err != nil {
 			m.logger.Error().Err(err).Msg("Force unmount failed")
 			// Don't return error here, update the state anyway
 		}
@@ -242,7 +242,7 @@ func (m *Manager) createConfig() error {
 }
 
 // forceUnmount attempts to force unmount a path using system commands
-func (m *Manager) forceUnmount() error {
+func (m *Manager) forceUnmount(ctx context.Context) error {
 	mountPath := config.Get().Mount.MountPath
 	methods := [][]string{
 		{"umount", mountPath},
@@ -251,7 +251,7 @@ func (m *Manager) forceUnmount() error {
 		{"fusermount3", "-uz", mountPath},
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
 	for _, method := range methods {

@@ -35,9 +35,9 @@ type Manager struct {
 	cancel        context.CancelFunc
 	serverReady   chan struct{}
 	serverStarted atomic.Bool
-	info      atomic.Pointer[MountInfo]
-	manager   *manager.Manager
-	webdavURL string
+	info          atomic.Pointer[MountInfo]
+	manager       *manager.Manager
+	webdavURL     string
 
 	client *rclone.Client
 }
@@ -92,8 +92,6 @@ func NewManager(manager *manager.Manager) *Manager {
 	ctx, cancel := context.WithCancel(context.Background())
 	rcServer := fmt.Sprintf("http://localhost:%s", cfg.Rclone.Port)
 	rcloneClient := rclone.NewClient(rcServer, "", "", _logger)
-
-
 
 	m := &Manager{
 		configDir:   configDir,
@@ -251,7 +249,6 @@ func (m *Manager) Stop() error {
 	return nil
 }
 
-
 func (m *Manager) getMountInfo() *MountInfo {
 	return m.info.Load()
 }
@@ -274,7 +271,7 @@ func (m *Manager) startMount(ctx context.Context) error {
 		return fmt.Errorf("rclone RC server is not reachable: %w", err)
 	}
 
-	if err := m.mountWithRetry(3); err != nil {
+	if err := m.mountWithRetry(ctx, 3); err != nil {
 		m.logger.Error().Msg("Mount operation failed")
 		return fmt.Errorf("mount failed for")
 	}
@@ -290,7 +287,7 @@ func (m *Manager) stopMount() error {
 
 	m.logger.Info().Msg("Unmounting via RC")
 
-	m.unmount()
+	m.unmount(m.ctx)
 	m.logger.Info().Msgf("Successfully unmounted %s", m.getMountInfo().LocalPath)
 	return nil
 }

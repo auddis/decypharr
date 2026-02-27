@@ -107,13 +107,18 @@ class ConfigManager {
             'nzb_user_agent', 'download_folder', 'refresh_interval',
             'max_downloads', 'skip_pre_cache', 'always_rm_tracker_urls',
             'folder_naming', 'refresh_dirs',
-            'default_download_action', 'download_connections'
+            'default_download_action'
         ];
 
         fields.forEach(field => {
             const element = document.querySelector(`[name="${field}"]`);
             if (element && config[field] !== undefined) {
-                element.value = config[field];
+                // Handle checkboxes
+                if (element.type === 'checkbox') {
+                    element.checked = config[field];
+                } else {
+                    element.value = config[field];
+                }
             }
         });
 
@@ -995,6 +1000,8 @@ class ConfigManager {
         try {
             const config = this.collectFormData();
 
+            console.log(config)
+
             // Validate configuration
             const validation = this.validateConfiguration(config);
             if (!validation.valid) {
@@ -1087,7 +1094,6 @@ class ConfigManager {
             refresh_interval: document.querySelector('[name="refresh_interval"]').value || "30s",
             default_download_action: document.querySelector('[name="default_download_action"]')?.value || "symlink",
             max_downloads: parseInt(document.querySelector('[name="max_downloads"]').value) || 0,
-            download_connections: parseInt(document.querySelector('[name="download_connections"]').value) || 16,
             skip_pre_cache: document.querySelector('[name="skip_pre_cache"]').checked,
             always_rm_tracker_urls: document.querySelector('[name="always_rm_tracker_urls"]').checked,
             folder_naming: document.querySelector('[name="folder_naming"]')?.value || "",

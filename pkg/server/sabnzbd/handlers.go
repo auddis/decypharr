@@ -593,11 +593,15 @@ func (s *SABnzbd) addNZBFile(ctx context.Context, content []byte, filename strin
 	cfg := config.Get()
 
 	importReq := manager.NewNZBRequest(filename, s.downloadFolder, content, arr, action, cfg.CallbackURL, manager.ImportTypeSABnzbd, cfg.SkipMultiSeason)
-	id, err := s.manager.AddNewNZB(ctx, importReq)
-	if err != nil {
+	job := manager.NewJob(manager.JobTypeNZB, importReq)
+	if err := s.manager.SubmitJob(job); err != nil {
+		return "", fmt.Errorf("failed to submit NZB job: %w", err)
+	}
+	// Wait for the NZB to be parsed and entry created (so we can return the ID)
+	if err := job.Wait(ctx); err != nil {
 		return "", err
 	}
-	return id, nil
+	return importReq.Id, nil
 }
 
 // formatSize formats bytes to human-readable string (SABnzbd format)

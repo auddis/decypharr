@@ -27,10 +27,16 @@ const (
 	downloaderWindow = 4 * 1024 * 1024 // 4MB
 	// kickerInterval is how often the safety-net ticker checks waiters and idle timeout
 	kickerInterval = 5 * time.Second
+	// activeWaiterKickerInterval is the faster fallback cadence while readers are blocked.
+	activeWaiterKickerInterval = 1 * time.Second
 	// idleTimeout is how long before stopping all downloaders due to inactivity
 	idleTimeout = 30 * time.Second
 	// circuitCooldownDuration is how long to block requests after max errors reached
 	circuitCooldownDuration = 20 * time.Minute
+	// noProgressTimeout is the max time a stream attempt may run without any bytes written.
+	noProgressTimeout = 45 * time.Second
+	// noProgressCheckInterval is how often stall detection checks for forward progress.
+	noProgressCheckInterval = 1 * time.Second
 )
 
 // Downloaders coordinates multiple concurrent downloads to a cache item
@@ -66,10 +72,6 @@ type Downloaders struct {
 	// Circuit breaker - blocks all requests when max errors reached
 	circuitOpen   atomic.Bool  // True when circuit is "open" (blocking all requests)
 	circuitOpenAt atomic.Int64 // Unix nano timestamp when circuit opened
-
-	// Stat counters (point to VFS Manager's atomics)
-	bytesReadCounter *atomic.Int64
-	errorsCounter    *atomic.Int64
 }
 
 // ensureStreamTracked makes sure the active stream is registered when reads begin.
@@ -101,9 +103,11 @@ type waiter struct {
 
 // downloader represents a single download goroutine
 type downloader struct {
-	dls  *Downloaders
-	quit chan struct{}
-	kick chan struct{}
+	dls    *Downloaders
+	quit   chan struct{}
+	kick   chan struct{}
+	ctx    context.Context    // per-downloader context; canceled by stop()
+	cancel context.CancelFunc // cancels ctx
 
 	mu        sync.Mutex
 	start     int64 // Starting offset
@@ -121,8 +125,67 @@ type downloader struct {
 	idleTimer *time.Timer
 }
 
+// startNoProgressWatchdog cancels an in-flight stream attempt when no bytes are
+// observed for the configured timeout window.
+func startNoProgressWatchdog(
+	ctx context.Context,
+	timeout time.Duration,
+	interval time.Duration,
+	lastProgressNanos *atomic.Int64,
+	cancel context.CancelFunc,
+	timedOut *atomic.Bool,
+) func() {
+	if timeout <= 0 || lastProgressNanos == nil || cancel == nil {
+		return func() {}
+	}
+	if interval <= 0 || interval > timeout {
+		interval = timeout / 5
+		if interval <= 0 {
+			interval = time.Second
+		}
+	}
+
+	done := make(chan struct{})
+	var once sync.Once
+	stop := func() {
+		once.Do(func() {
+			close(done)
+		})
+	}
+
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-done:
+				return
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				last := lastProgressNanos.Load()
+				now := time.Now().UnixNano()
+				if last == 0 {
+					lastProgressNanos.Store(now)
+					continue
+				}
+				if now-last >= int64(timeout) {
+					if timedOut != nil {
+						timedOut.Store(true)
+					}
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+
+	return stop
+}
+
 // NewDownloaders creates a new download coordinator
-func NewDownloaders(ctx context.Context, mgr *manager.Manager, item *CacheItem, cfg *fuseconfig.FuseConfig, bytesRead, errors *atomic.Int64) *Downloaders {
+func NewDownloaders(ctx context.Context, mgr *manager.Manager, item *CacheItem, cfg *fuseconfig.FuseConfig) *Downloaders {
 	parentCtx := ctx
 	ctx, cancel := context.WithCancel(parentCtx)
 	chunkSize := cfg.ChunkSize
@@ -139,17 +202,16 @@ func NewDownloaders(ctx context.Context, mgr *manager.Manager, item *CacheItem, 
 	}
 
 	dls := &Downloaders{
-		parentCtx:        parentCtx,
-		ctx:              ctx,
-		cancel:           cancel,
-		item:             item,
-		manager:          mgr,
-		chunkSize:        chunkSize,
-		readAheadSize:    readAheadSize,
-		retries:          retries,
-		streamID:         "",
-		bytesReadCounter: bytesRead,
-		errorsCounter:    errors,
+		parentCtx:     parentCtx,
+		ctx:           ctx,
+		cancel:        cancel,
+		item:          item,
+		manager:       mgr,
+		chunkSize:     chunkSize,
+		readAheadSize: readAheadSize,
+		retries:       retries,
+		// streamID is populated lazily when the first read occurs.
+		streamID: "",
 	}
 	dls.touchActivity() // Initialize activity timestamp
 
@@ -234,27 +296,8 @@ func (dls *Downloaders) getLastErr() error {
 // data, so the downloader's target always stays ahead of the read position.
 // The downloader idle timeout naturally limits waste on probes/seeks.
 func (dls *Downloaders) ensureDownloaderLocked(r ranges.Range) error {
-	// The buffer window is how far ahead we keep data cached
-	bufferWindow := dls.readAheadSize
-	if bufferWindow <= 0 {
-		bufferWindow = dls.chunkSize * 4
-	}
-
-	// Save original request end before read-ahead extension.
-	// Used to limit new downloader targets so probes (small reads)
-	// don't trigger full read-ahead downloads.
-	originalEnd := r.Pos + r.Size
-
-	// Extend range by read-ahead BEFORE clipping to missing.
-	// This ensures the downloader's maxOffset stays ahead of the read position,
-	// so sequential reads always have data prefetched.
-	r.Size += bufferWindow
-	if r.Pos+r.Size > dls.item.info.Size {
-		r.Size = dls.item.info.Size - r.Pos
-	}
-
-	// Clip to what's actually missing
-	r = dls.item.FindMissing(r)
+	// Extend by read-ahead then clip to actual missing bytes.
+	r = dls.extendAndFindMissingRangeLocked(r)
 
 	// If the requested range + read-ahead is already present, we just need
 	// to kick an existing downloader to prevent idle timeout. No new download needed.
@@ -263,7 +306,7 @@ func (dls *Downloaders) ensureDownloaderLocked(r ranges.Range) error {
 		return nil
 	}
 
-	// Target end: download the full missing range (includes read-ahead)
+	// Target end: download the full missing range
 	targetEnd := r.Pos + r.Size
 
 	// Check error count
@@ -276,46 +319,59 @@ func (dls *Downloaders) ensureDownloaderLocked(r ranges.Range) error {
 
 	// Look for existing downloader in range
 	dls.removeClosed()
+	if dl := dls.findDownloaderForPosLocked(r.Pos); dl != nil {
+		// Extend existing downloader
+		dl.setMaxOffset(targetEnd)
+		return nil
+	}
+
+	// Start new downloader
+	return dls.newDownloaderLocked(r, targetEnd)
+}
+
+// extendAndFindMissingRangeLocked expands a request by read-ahead and returns
+// only the missing tail that must be downloaded.
+func (dls *Downloaders) extendAndFindMissingRangeLocked(r ranges.Range) ranges.Range {
+	bufferWindow := dls.readAheadSize
+	if bufferWindow <= 0 {
+		bufferWindow = dls.chunkSize * 4
+	}
+
+	r.Size += bufferWindow
+	if r.Pos+r.Size > dls.item.info.Size {
+		r.Size = dls.item.info.Size - r.Pos
+	}
+	return dls.item.FindMissing(r)
+}
+
+func (dls *Downloaders) downloaderMatchWindowLocked() int64 {
 	window := int64(downloaderWindow)
 	if half := dls.chunkSize / 2; half > window {
 		window = half
 	}
+	return window
+}
+
+func (dls *Downloaders) findDownloaderForPosLocked(pos int64) *downloader {
+	window := dls.downloaderMatchWindowLocked()
 	for _, dl := range dls.dls {
 		start, offset := dl.getRange()
-		if r.Pos >= start && r.Pos < offset+window {
-			// Extend existing downloader with full read-ahead target.
-			// This is safe: the downloader is already active for this region,
-			// so this is a sequential read pattern.
-			dl.setMaxOffset(targetEnd)
-			return nil
+		if pos >= start && pos < offset+window {
+			return dl
 		}
 	}
-
-	// Start new downloader with conservative target: just 1 chunk past the
-	// original request. This prevents probes (64KB reads) from triggering
-	// full read-ahead downloads (16MB). Sequential reads will extend the
-	// downloader via setMaxOffset above on subsequent calls.
-	conservativeEnd := originalEnd + dls.chunkSize
-	if conservativeEnd > targetEnd {
-		conservativeEnd = targetEnd
-	}
-	return dls.newDownloaderLocked(r, conservativeEnd)
+	return nil
 }
 
 // kickExistingDownloaderLocked kicks a nearby downloader to prevent idle timeout.
 // Caller must hold dls.mu.
 func (dls *Downloaders) kickExistingDownloaderLocked(pos int64) {
-	window := int64(downloaderWindow)
-	if half := dls.chunkSize / 2; half > window {
-		window = half
+	dl := dls.findDownloaderForPosLocked(pos)
+	if dl == nil {
+		return
 	}
-	for _, dl := range dls.dls {
-		start, offset := dl.getRange()
-		if pos >= start && pos < offset+window {
-			dl.setMaxOffset(offset) // kick without extending
-			return
-		}
-	}
+	_, offset := dl.getRange()
+	dl.setMaxOffset(offset) // kick without extending
 }
 
 // newDownloaderLocked creates and starts a new downloader
@@ -325,10 +381,17 @@ func (dls *Downloaders) newDownloaderLocked(r ranges.Range, targetEnd int64) err
 		baseChunk = 4 * 1024 * 1024
 	}
 
+	// Each downloader gets its own context derived from the Downloaders context.
+	// stop() cancels dlCtx, which interrupts any in-flight manager.Stream call
+	// without having to cancel the shared dls.ctx.
+	dlCtx, dlCancel := context.WithCancel(dls.ctx)
+
 	dl := &downloader{
 		dls:              dls,
 		quit:             make(chan struct{}),
 		kick:             make(chan struct{}, 1),
+		ctx:              dlCtx,
+		cancel:           dlCancel,
 		start:            r.Pos,
 		offset:           r.Pos,
 		maxOffset:        targetEnd,
@@ -338,12 +401,21 @@ func (dls *Downloaders) newDownloaderLocked(r ranges.Range, targetEnd int64) err
 
 	dls.dls = append(dls.dls, dl)
 
+	// Track active download count
+	dls.item.cache.activeDownloads.Add(1)
+
 	dl.wg.Add(1)
 	go func() {
 		defer dl.wg.Done()
+		defer dls.item.cache.activeDownloads.Add(-1)
+		defer dlCancel() // always release the per-downloader context
 		n, err := dl.run()
 		dl.close(err)
-		dls.countErrors(n, err)
+		// Only count real errors. If dl.ctx was canceled (intentional stop/close),
+		// the error is not a network/server failure and must not trip the circuit breaker.
+		if dl.ctx.Err() == nil {
+			dls.countErrors(n, err)
+		}
 		dls.kickWaiters()
 	}()
 
@@ -361,13 +433,10 @@ func (dls *Downloaders) removeClosed() {
 	dls.dls = newDls
 }
 
-// countErrors tracks errors and resets on success
+// countErrors tracks errors and resets on success.
+// Context cancellation (intentional stop/close) is never counted — it must not
+// trip the circuit breaker, because the downloader was halted on purpose.
 func (dls *Downloaders) countErrors(n int64, err error) {
-	// Update stats counters
-	if n > 0 && dls.bytesReadCounter != nil {
-		dls.bytesReadCounter.Add(n)
-	}
-
 	dls.mu.Lock()
 	defer dls.mu.Unlock()
 
@@ -379,8 +448,9 @@ func (dls *Downloaders) countErrors(n int64, err error) {
 		return
 	}
 	if err != nil {
-		if dls.errorsCounter != nil {
-			dls.errorsCounter.Add(1)
+		// Intentional stop/shutdown — not a real failure.
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return
 		}
 		dls.errorCount++
 		dls.lastErr = err
@@ -425,13 +495,30 @@ func (dls *Downloaders) kickWaiters() {
 			fulfilled++
 		} else {
 			remaining = append(remaining, w)
-			// Ensure there's a downloader for this waiter
-			_ = dls.ensureDownloaderLocked(w.r)
 		}
 	}
 	dls.waiters = remaining
 	if fulfilled > 0 {
 		dls.waiterCount.Add(-int32(fulfilled))
+	}
+
+	// Spawn at most one missing downloader per kick. Re-ensuring for every
+	// waiter can create duplicate stream calls for the same range under load.
+	if len(remaining) == 0 || circuitOpen || dls.errorCount >= maxErrorCount {
+		return
+	}
+
+	dls.removeClosed()
+	for _, w := range remaining {
+		missing := dls.extendAndFindMissingRangeLocked(w.r)
+		if missing.IsEmpty() {
+			continue
+		}
+		if dls.findDownloaderForPosLocked(missing.Pos) != nil {
+			continue
+		}
+		_ = dls.ensureDownloaderLocked(w.r)
+		break
 	}
 }
 
@@ -520,6 +607,7 @@ func (dls *Downloaders) openCircuitLocked() {
 	}
 	dls.circuitOpen.Store(true)
 	dls.circuitOpenAt.Store(time.Now().UnixNano())
+	dls.item.cache.circuitBreakers.Add(1)
 }
 
 // resetCircuitLocked resets the circuit breaker after successful download. Caller must hold dls.mu.
@@ -529,64 +617,58 @@ func (dls *Downloaders) resetCircuitLocked() {
 	}
 	dls.circuitOpen.Store(false)
 	dls.circuitOpenAt.Store(0)
+	dls.item.cache.circuitBreakers.Add(-1)
 }
 
-// checkIdleTimeout returns true if idle timeout has been reached and stops all downloaders.
-// It cancels the context to interrupt in-flight HTTP requests (matching StopAll behavior)
-// and waits for goroutines to exit so no zombie connections linger.
+// checkIdleTimeout returns true if idle timeout has been reached and stops all downloaders
 func (dls *Downloaders) checkIdleTimeout() bool {
 	dls.mu.Lock()
+	defer dls.mu.Unlock()
 
 	// Don't timeout if already closed or already idle
 	if dls.closed {
-		dls.mu.Unlock()
 		return true
 	}
 
 	// Don't timeout if there are active waiters
 	if len(dls.waiters) > 0 {
-		dls.mu.Unlock()
 		return false
+	}
+
+	// Check if any downloaders are still running
+	activeDownloaders := 0
+	for _, dl := range dls.dls {
+		if !dl.isClosed() {
+			activeDownloaders++
+		}
 	}
 
 	// Check idle timeout
 	lastActivity := dls.lastActivity.Load()
 	if lastActivity == 0 {
-		dls.mu.Unlock()
 		return false
 	}
 
 	idleDuration := time.Since(time.Unix(0, lastActivity))
 	if idleDuration < idleTimeout {
-		dls.mu.Unlock()
 		return false
 	}
 
-	// Idle timeout reached - stop all downloaders and cancel context
-	// to interrupt in-flight HTTP requests immediately.
-	dlsCopy := make([]*downloader, len(dls.dls))
-	copy(dlsCopy, dls.dls)
-
-	for _, dl := range dlsCopy {
+	// Idle timeout reached - stop all downloaders
+	for _, dl := range dls.dls {
 		dl.stop()
 	}
 	dls.dls = nil
 	dls.untrackStreamLocked()
 	dls.idle.Store(true)
 
-	oldCancel := dls.cancel
-	// Recreate context so future Download() calls work after idle recovery.
-	dls.ctx, dls.cancel = context.WithCancel(dls.parentCtx)
-	dls.mu.Unlock()
-
-	// Cancel outside lock to interrupt in-flight Stream/HTTP calls.
-	oldCancel()
-
-	// Wait for downloader goroutines to actually exit so no zombie
-	// connections or goroutines linger after idle evict.
-	for _, dl := range dlsCopy {
-		dl.wg.Wait()
-	}
+	// Reset error budget so the next session starts fresh.
+	// Errors from the previous session must not carry into a resumed session —
+	// that would shrink the error budget and could immediately trip the circuit
+	// breaker the next time the user starts playback.
+	dls.errorCount = 0
+	dls.lastErr = nil
+	dls.resetCircuitLocked()
 
 	return true
 }
@@ -604,6 +686,10 @@ func (dls *Downloaders) StopAll() {
 	// Copy slice before unlocking to avoid race during Wait
 	dlsCopy := make([]*downloader, len(dls.dls))
 	copy(dlsCopy, dls.dls)
+	waitersCopy := make([]waiter, len(dls.waiters))
+	copy(waitersCopy, dls.waiters)
+	dls.waiters = nil
+	dls.waiterCount.Store(0)
 
 	// Stop all downloaders
 	for _, dl := range dlsCopy {
@@ -617,6 +703,11 @@ func (dls *Downloaders) StopAll() {
 	// Cancel active context so in-flight Stream calls can be interrupted.
 	oldCancel()
 
+	// Unblock any pending readers waiting on ranges from old downloaders.
+	for _, w := range waitersCopy {
+		w.errChan <- errors.New("downloaders stopped")
+	}
+
 	// Wait for them to finish (using copy, safe to iterate without lock)
 	for _, dl := range dlsCopy {
 		dl.wg.Wait()
@@ -626,6 +717,11 @@ func (dls *Downloaders) StopAll() {
 	dls.mu.Lock()
 	if !dls.closed {
 		dls.ctx, dls.cancel = context.WithCancel(dls.parentCtx)
+		// Reset error budget for the next session. Accumulated errors from
+		// the current session must not poison resumed playback.
+		dls.errorCount = 0
+		dls.lastErr = nil
+		dls.resetCircuitLocked()
 	}
 	dls.mu.Unlock()
 }
@@ -645,9 +741,16 @@ func (dls *Downloaders) ensureKickerRunning() {
 	}
 }
 
+func (dls *Downloaders) currentKickerInterval() time.Duration {
+	if dls.waiterCount.Load() > 0 {
+		return activeWaiterKickerInterval
+	}
+	return kickerInterval
+}
+
 // startKicker starts a background safety-net goroutine that periodically checks
 // waiters and handles idle timeout. The primary notification path is direct
-// kickWaiters() calls from cacheWriter.Write(); this ticker is only a fallback.
+// kickWaiters() calls from cacheWriter.Write(); this timer is only a fallback.
 func (dls *Downloaders) startKicker() {
 	ctx := dls.ctx
 	dls.kickerDone = make(chan struct{})
@@ -656,17 +759,21 @@ func (dls *Downloaders) startKicker() {
 		defer dls.wg.Done()
 		defer close(dls.kickerDone)
 
-		ticker := time.NewTicker(kickerInterval)
-		defer ticker.Stop()
-
 		for {
+			timer := time.NewTimer(dls.currentKickerInterval())
 			select {
-			case <-ticker.C:
+			case <-timer.C:
 				dls.kickWaiters()
 				if dls.checkIdleTimeout() {
 					return
 				}
 			case <-ctx.Done():
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
 				return
 			}
 		}
@@ -712,8 +819,8 @@ func (dl *downloader) run() (totalBytes int64, err error) {
 			if errors.Is(chunkErr, io.EOF) {
 				return totalBytes, nil
 			}
-			if dl.dls.ctx.Err() != nil {
-				return totalBytes, dl.dls.ctx.Err()
+			if dl.ctx.Err() != nil {
+				return totalBytes, dl.ctx.Err()
 			}
 			return totalBytes, chunkErr
 		}
@@ -786,8 +893,8 @@ func (dl *downloader) downloadChunkWithRetry(start, end int64) (int64, error) {
 		if errors.Is(err, io.EOF) {
 			return written, err
 		}
-		if dl.dls.ctx.Err() != nil {
-			return written, dl.dls.ctx.Err()
+		if dl.ctx.Err() != nil {
+			return written, dl.ctx.Err()
 		}
 		if !customerror.IsRetriableError(err) {
 			return written, err
@@ -809,9 +916,9 @@ func (dl *downloader) downloadChunkWithRetry(start, end int64) (int64, error) {
 		timer := time.NewTimer(delay)
 		select {
 		case <-timer.C:
-		case <-dl.dls.ctx.Done():
+		case <-dl.ctx.Done():
 			timer.Stop()
-			return written, dl.dls.ctx.Err()
+			return written, dl.ctx.Err()
 		}
 
 		// Exponential backoff
@@ -865,8 +972,30 @@ func (dl *downloader) streamChunk(start, end int64) (int64, error) {
 		offset: missingRange.Pos,
 	}
 
+	// Use an attempt-scoped context so a no-progress timeout can cancel only this
+	// stream call while keeping the downloader alive for retries.
+	attemptCtx, attemptCancel := context.WithCancel(dl.ctx)
+	defer attemptCancel()
+
+	var lastProgressNanos atomic.Int64
+	lastProgressNanos.Store(time.Now().UnixNano())
+	var timedOut atomic.Bool
+	stopWatchdog := startNoProgressWatchdog(
+		attemptCtx,
+		noProgressTimeout,
+		noProgressCheckInterval,
+		&lastProgressNanos,
+		attemptCancel,
+		&timedOut,
+	)
+	defer stopWatchdog()
+
+	writer.onProgress = func(_ int) {
+		lastProgressNanos.Store(time.Now().UnixNano())
+	}
+
 	err := dl.dls.manager.Stream(
-		dl.dls.ctx,
+		attemptCtx,
 		dl.dls.item.entry,
 		dl.dls.item.filename,
 		missingRange.Pos,
@@ -877,8 +1006,11 @@ func (dl *downloader) streamChunk(start, end int64) (int64, error) {
 	)
 
 	if err != nil {
-		if dl.dls.ctx.Err() != nil || errors.Is(err, context.Canceled) {
-			return writer.written, dl.dls.ctx.Err()
+		if dl.ctx.Err() != nil {
+			return writer.written, dl.ctx.Err()
+		}
+		if timedOut.Load() {
+			return writer.written, fmt.Errorf("stream stalled for %s: i/o timeout", noProgressTimeout)
 		}
 		return writer.written, err
 	}
@@ -936,7 +1068,8 @@ func (dl *downloader) adjustChunkSize(chunkLen, written int64, success bool) {
 	dl.currentChunkSize = next
 }
 
-// stop signals the downloader to stop
+// stop signals the downloader to stop and cancels its context so any
+// in-flight manager.Stream call is interrupted promptly.
 func (dl *downloader) stop() {
 	dl.mu.Lock()
 	if !dl.stopped {
@@ -944,6 +1077,7 @@ func (dl *downloader) stop() {
 		close(dl.quit)
 	}
 	dl.mu.Unlock()
+	dl.cancel() // interrupt in-flight manager.Stream
 }
 
 // close marks the downloader as closed
@@ -973,12 +1107,17 @@ type cacheWriter struct {
 	item    *CacheItem
 	offset  int64
 	written int64
+	// onProgress is called whenever bytes are consumed from the stream.
+	onProgress func(int)
 }
 
 func (w *cacheWriter) Write(p []byte) (int, error) {
 	n, skipped, err := w.item.WriteAtNoOverwrite(p, w.offset)
 	if err != nil {
 		return n, err
+	}
+	if n > 0 && w.onProgress != nil {
+		w.onProgress(n)
 	}
 
 	w.dl.mu.Lock()
@@ -1002,8 +1141,12 @@ func (w *cacheWriter) Write(p []byte) (int, error) {
 	actuallyWritten := int64(n - skipped)
 	w.written += actuallyWritten
 
-	if actuallyWritten > 0 && w.dl.dls.waiterCount.Load() > 0 {
-		w.dl.dls.kickWaiters()
+	// Track total bytes downloaded
+	if actuallyWritten > 0 {
+		w.dl.dls.item.cache.AddDownloadedBytes(actuallyWritten)
+		if w.dl.dls.waiterCount.Load() > 0 {
+			w.dl.dls.kickWaiters()
+		}
 	}
 
 	return n, nil

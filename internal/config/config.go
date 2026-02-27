@@ -106,8 +106,8 @@ type Config struct {
 	LogLevel string   `json:"log_level,omitempty"`
 	Debrids  []Debrid `json:"debrids,omitzero"`
 
-	Arrs   []Arr  `json:"arrs,omitzero"`
-	Usenet Usenet `json:"usenet,omitzero"` // Usenet configuration
+	Arrs        []Arr       `json:"arrs,omitzero"`
+	Usenet      Usenet      `json:"usenet,omitzero"`      // Usenet configuration
 	QBitTorrent QBitTorrent `json:"qbittorrent,omitzero"` // Deprecated: use Manager instead
 	Rclone      Rclone      `json:"rclone,omitzero"`      // Deprecated: use Mounts instead
 	Mount       Mount       `json:"mount,omitzero"`
@@ -141,8 +141,6 @@ type Config struct {
 	FolderNaming          WebDavFolderNaming       `json:"folder_naming,omitempty"`
 	CustomFolders         map[string]CustomFolders `json:"custom_folders,omitempty"`
 	DefaultDownloadAction DownloadAction           `json:"default_download_action,omitempty"`
-
-	DownloadConnections int `json:"download_connections,omitempty"` // Number of connections per download (default 16)
 
 	RefreshDirs  string `json:"refresh_dirs,omitempty"`
 	Retries      int    `json:"retries,omitempty"`
@@ -423,10 +421,6 @@ func (c *Config) setDefaults() {
 	// Set default error threshold for multi-debrid switching
 	if c.Retries == 0 {
 		c.Retries = 3 // Default to 3 consecutive errors before switching
-	}
-
-	if c.DownloadConnections == 0 {
-		c.DownloadConnections = 16
 	}
 
 	// Basic defaults

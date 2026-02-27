@@ -25,10 +25,6 @@ type Manager struct {
 
 	totalFiles  atomic.Int32
 	activeFiles atomic.Int32
-
-	// Cumulative counters (since service start)
-	totalBytesRead atomic.Int64
-	totalErrors    atomic.Int64
 }
 
 // fileEntry tracks file metadata
@@ -56,13 +52,8 @@ func NewManager(ctx context.Context, mgr *manager.Manager, config *config.FuseCo
 		cancel:  cancel,
 	}
 
-	// Wire stat counters so downloaders flow up to this manager
-	cache.bytesReadCounter = &m.totalBytesRead
-	cache.errorsCounter = &m.totalErrors
-
 	return m, nil
 }
-
 
 func (m *Manager) GetManager() *manager.Manager {
 	return m.manager
@@ -134,20 +125,24 @@ func (m *Manager) Close() error {
 	return nil
 }
 
-// Stats returns manager statistics.
-func (m *Manager) Stats() manager.VFSDetail {
-	var cs manager.CacheDetail
-	if m.cache != nil {
-		cs = m.cache.Stats()
+// GetStats returns manager statistics
+func (m *Manager) GetStats() map[string]interface{} {
+	stats := map[string]interface{}{
+		"type":         "dfs",
+		"ready":        true,
+		"enabled":      true,
+		"total_files":  m.totalFiles.Load(),
+		"active_files": m.activeFiles.Load(),
 	}
 
-	return manager.VFSDetail{
-		TotalFiles:     m.totalFiles.Load(),
-		ActiveFiles:    m.activeFiles.Load(),
-		Cache:          cs,
-		TotalBytesRead: m.totalBytesRead.Load(),
-		TotalErrors:    m.totalErrors.Load(),
+	// Add cache stats
+	if m.cache != nil {
+		for k, v := range m.cache.GetStats() {
+			stats["cache_"+k] = v
+		}
 	}
+
+	return stats
 }
 
 func buildFileKey(parent, name string) string {

@@ -25,11 +25,13 @@ func (m *Manager) AddNewTorrent(ctx context.Context, importReq *ImportRequest) e
 
 	debridTorrent, err = m.SendToDebrid(ctx, importReq)
 	if err != nil {
-		// Check if too many active downloads
+		// Check if too many active downloads - resubmit through the job queue
 		var customErr *customerror.Error
 		if errors.As(err, &customErr) && customErr.Code == "too_many_active_downloads" {
-			m.logger.Warn().Msgf("Too many active downloads, marking as queued: %s", importReq.Magnet.Name)
-			if err := m.queue.ReQueue(importReq); err != nil {
+			m.logger.Warn().Msgf("Too many active downloads, re-queuing: %s", importReq.Magnet.Name)
+			importReq.Status = "queued"
+			job := NewJob(JobTypeTorrent, importReq)
+			if err := m.SubmitJob(job); err != nil {
 				return err
 			}
 			return nil
@@ -80,6 +82,14 @@ func (m *Manager) processQueuedEntries() {
 	if len(queueEntries) == 0 {
 		return
 	}
+
+	// Use a semaphore to limit concurrent processing goroutines
+	maxConcurrent := m.config.MaxDownloads
+	if maxConcurrent <= 0 {
+		maxConcurrent = 5
+	}
+	sem := make(chan struct{}, maxConcurrent)
+
 	for _, entry := range queueEntries {
 		// Parse only active downloading torrents
 		if entry.State != storage.EntryStateDownloading {
@@ -89,12 +99,25 @@ func (m *Manager) processQueuedEntries() {
 		if entry.IsDownloading {
 			continue
 		}
+
+		// Acquire semaphore slot
+		sem <- struct{}{}
 		if entry.IsTorrent() {
 			if entry.ActiveProvider != "" {
-				go m.processQueuedTorrent(entry)
+				go func(e *storage.Entry) {
+					defer func() { <-sem }()
+					m.processQueuedTorrent(e)
+				}(entry)
+			} else {
+				<-sem // Release if not processing
 			}
 		} else if entry.IsNZB() {
-			go m.processQueuedNZB(entry)
+			go func(e *storage.Entry) {
+				defer func() { <-sem }()
+				m.processQueuedNZB(e)
+			}(entry)
+		} else {
+			<-sem // Release if not processing
 		}
 	}
 }
@@ -124,7 +147,7 @@ func (m *Manager) processQueuedNZB(entry *storage.Entry) {
 		// Still processing, skip for now
 		return
 	case usenet.NZBStatusCompleted:
-		if err := m.processNZB(context.Background(), entry, metadata); err != nil {
+		if err := m.processNZB(entry, metadata); err != nil {
 			m.logger.Error().Err(err).Str("name", entry.Name).Msg("Error processing queued NZB")
 			entry.MarkAsError(err)
 			_ = m.queue.Update(entry)

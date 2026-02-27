@@ -37,8 +37,9 @@ type SegmentFetcher struct {
 	prefetchWg sync.WaitGroup
 
 	// Lifecycle
-	ctx    context.Context
-	cancel context.CancelFunc
+	ctx       context.Context
+	cancel    context.CancelFunc
+	closeOnce sync.Once
 }
 
 // fetchPromise allows multiple goroutines to wait for the same segment download.
@@ -92,7 +93,7 @@ func (sf *SegmentFetcher) Fetch(ctx context.Context, segIdx int) error {
 	// Fast path: already cached
 	state := sf.cache.GetState(segIdx)
 	switch state {
-	case StateOnDisk:
+	case StateInMemory, StateOnDisk:
 		return nil
 	case StateFailed:
 		return sf.cache.GetError(segIdx)
@@ -143,7 +144,7 @@ func (sf *SegmentFetcher) doFetch(ctx context.Context, segIdx int) error {
 		// Someone else is fetching or it's already cached
 		state := sf.cache.GetState(segIdx)
 		switch state {
-		case StateOnDisk:
+		case StateInMemory, StateOnDisk:
 			return nil
 		case StateFailed:
 			return sf.cache.GetError(segIdx)
@@ -253,15 +254,13 @@ func (sf *SegmentFetcher) isRetryable(err error) bool {
 
 // QueuePrefetch adds a segment to the background prefetch queue (non-blocking).
 func (sf *SegmentFetcher) QueuePrefetch(segIdx int) {
-	// Check if already cached or shutting down
+	// Check if already cached
 	state := sf.cache.GetState(segIdx)
-	if state == StateOnDisk || state == StateFetching {
+	if state == StateInMemory || state == StateOnDisk || state == StateFetching {
 		return
 	}
 
 	select {
-	case <-sf.ctx.Done():
-		return // Shutting down, don't send
 	case sf.prefetchCh <- segIdx:
 		// Queued successfully
 	default:
@@ -285,10 +284,13 @@ func (sf *SegmentFetcher) prefetchWorker(id int) {
 		select {
 		case <-sf.ctx.Done():
 			return
-		case segIdx := <-sf.prefetchCh:
+		case segIdx, ok := <-sf.prefetchCh:
+			if !ok {
+				return // Channel closed during shutdown
+			}
 			// Check if still needed
 			state := sf.cache.GetState(segIdx)
-			if state == StateOnDisk {
+			if state == StateInMemory || state == StateOnDisk {
 				sf.stats.PrefetchHits.Add(1)
 				continue
 			}
@@ -308,42 +310,29 @@ func (sf *SegmentFetcher) prefetchWorker(id int) {
 	}
 }
 
-// EnsureSegments fetches all segments in the range concurrently,
-// returning when all are available. The semaphore limits connection usage.
+// EnsureSegments fetches all missing segments in the range concurrently.
+// The semaphore inside Fetch already limits NNTP connection usage.
 func (sf *SegmentFetcher) EnsureSegments(ctx context.Context, startSeg, endSeg int) error {
-	// Count how many segments actually need fetching
-	needsFetch := false
+	g, ctx := errgroup.WithContext(ctx)
 	for i := startSeg; i <= endSeg; i++ {
 		state := sf.cache.GetState(i)
-		if state != StateOnDisk {
-			needsFetch = true
-			break
+		if state != StateInMemory && state != StateOnDisk {
+			g.Go(func() error {
+				return sf.Fetch(ctx, i)
+			})
 		}
-	}
-	if !needsFetch {
-		return nil
-	}
-
-	g, gctx := errgroup.WithContext(ctx)
-	for i := startSeg; i <= endSeg; i++ {
-		state := sf.cache.GetState(i)
-		if state == StateOnDisk {
-			continue
-		}
-		i := i
-		g.Go(func() error {
-			return sf.Fetch(gctx, i)
-		})
 	}
 	return g.Wait()
 }
 
 // Close stops all workers and waits for them to finish.
-// Uses context cancellation instead of closing the channel to avoid
-// a race with concurrent QueuePrefetch sends.
+// Safe to call multiple times.
 func (sf *SegmentFetcher) Close() {
-	sf.cancel()
-	sf.prefetchWg.Wait()
+	sf.closeOnce.Do(func() {
+		sf.cancel()
+		close(sf.prefetchCh)
+		sf.prefetchWg.Wait()
+	})
 }
 
 // Error types

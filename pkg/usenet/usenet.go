@@ -516,20 +516,22 @@ func (u *Usenet) Stop() {
 func (u *Usenet) Close() error {
 	u.logger.Info().Msg("Closing Usenet NNTP client")
 
-	// Cleanup all active FS entries
+	// Close NNTP client FIRST to force-close all active connections.
+	// This unblocks any in-flight StreamBody/TCP reads in prefetch workers,
+	// allowing SegmentFetcher.Close() (prefetchWg.Wait()) to complete without hanging.
+	if u.nntp != nil {
+		if err := u.nntp.Close(); err != nil {
+			u.logger.Warn().Err(err).Msg("Failed to close NNTP client")
+		}
+	}
+
+	// Cleanup all active FS entries (fetcher.Close() now completes quickly
+	// because connections were already force-closed above)
 	u.fs.Range(func(key string, entry *fsEntry) bool {
 		entry.cleanup()
 		return true
 	})
 	u.fs.Clear()
-
-	// Close NNTP client (closes connection manager and all connections)
-	if u.nntp != nil {
-		if err := u.nntp.Close(); err != nil {
-			u.logger.Warn().Err(err).Msg("Failed to close NNTP client")
-			return err
-		}
-	}
 
 	u.logger.Info().Msg("Usenet closed")
 	return nil
@@ -782,29 +784,12 @@ func (u *Usenet) PreCache(ctx context.Context, nzoID, filename string) error {
 	return nil
 }
 
-// UsenetStats holds usenet client statistics.
-type UsenetStats struct {
-	Pool       nntp.NNTPPoolStats       `json:"pool"`
-	Providers  []nntp.NNTPProviderStats `json:"providers"`
-	Readers    int                      `json:"readers"`
-	NZBStorage NZBStorageStats          `json:"nzb_storage"`
-}
-
 // Stats returns nntp statistics
-func (u *Usenet) Stats() *UsenetStats {
-	nntpStats := u.nntp.Stats()
-	if nntpStats == nil {
-		return &UsenetStats{
-			Readers:    u.fs.Size(),
-			NZBStorage: u.nzbStorage.Stats(),
-		}
-	}
-	return &UsenetStats{
-		Pool:       nntpStats.Pool,
-		Providers:  nntpStats.Providers,
-		Readers:    u.fs.Size(),
-		NZBStorage: u.nzbStorage.Stats(),
-	}
+func (u *Usenet) Stats() map[string]interface{} {
+	stats := u.nntp.Stats()
+	stats["readers"] = u.fs.Size()
+	stats["nzb_storage"] = u.nzbStorage.Stats()
+	return stats
 }
 
 // GetNZB returns NZB metadata by ID
