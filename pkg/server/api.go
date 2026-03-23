@@ -531,9 +531,15 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 	// Filter out empty or incomplete arrs
 	validArrs := make([]config.Arr, 0, len(newConfig.Arrs))
 	for _, a := range newConfig.Arrs {
-		if a.Name != "" && a.Host != "" && a.Token != "" {
-			validArrs = append(validArrs, a)
+		if a.Name == "" || a.Host == "" || a.Token == "" {
+			continue
 		}
+		// Skip auto-detected arrs with invalid data (credentials instead of API tokens)
+		if a.Source == "auto" && utils.ValidateURL(a.Host) != nil {
+			s.logger.Warn().Str("arr", a.Name).Str("host", a.Host).Str("source", a.Source).Msg("Skipping auto-detected arr with invalid host")
+			continue
+		}
+		validArrs = append(validArrs, a)
 	}
 	newConfig.Arrs = validArrs
 

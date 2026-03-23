@@ -145,6 +145,7 @@ func TestGetMagnetFromUrl_MagnetLink_StripFalse(t *testing.T) {
 	t.Logf("Generated magnet link with trackers: %s", magnet.Link)
 }
 
+
 // testMagnetFromHttpTorrent is a helper function for tests that use GetMagnetFromUrl with HTTP torrent links
 func testMagnetFromHttpTorrent(t *testing.T, torrentPath string, rmTrackerUrls bool, expectedInfoHash, expectedName, expectedLink string, expectedTrackerCount int) {
 	t.Helper()
@@ -158,7 +159,7 @@ func testMagnetFromHttpTorrent(t *testing.T, torrentPath string, rmTrackerUrls b
 	// Create a test HTTP server that serves the torrent file
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/x-bittorrent")
-		_, _ = w.Write(torrentData)
+		w.Write(torrentData)
 	}))
 	defer server.Close()
 

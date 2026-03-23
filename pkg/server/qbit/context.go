@@ -137,20 +137,26 @@ func (q *QBit) authenticate(category, username, password string) (*arr.Arr, erro
 	cfg := config.Get()
 	a := q.manager.Arr().Get(category)
 	if a == nil {
-		// Arr is not configured, create a new one
+		// Arr is not configured, create a new one for this session only
 		downloadUncached := false
 		a = arr.New(category, username, password, false, false, &downloadUncached, "", "auto")
 	}
+
 	arrValidated := false // This is a flag to indicate if arr validation was successful
 	if (username == "" || password == "") && cfg.UseAuth {
-		return nil, fmt.Errorf("unauthorized: Host and token are required for authentication(you've enabled authentication)")
+		return nil, fmt.Errorf("unauthorized: Host and token are required for authentication (you've enabled authentication)")
 	}
-	if a.Source == "auto" {
+
+	// Only use credentials if we don't have a valid host/token yet
+	if a.Host == "" || a.Token == "" {
 		a.Host = username
 		a.Token = password
 	}
-	if err := a.Validate(); err == nil {
-		arrValidated = true
+
+	if a.Host != "" && a.Token != "" {
+		if err := a.Validate(); err == nil {
+			arrValidated = true
+		}
 	}
 
 	if !arrValidated && cfg.UseAuth {
@@ -160,8 +166,8 @@ func (q *QBit) authenticate(category, username, password string) (*arr.Arr, erro
 		}
 	}
 
-	if username != "" && password != "" {
-		// Then add or update arr in manager
+	// Only add to manager if it's a new auto-detected arr
+	if username != "" && password != "" && a.Source == "auto" && q.manager.Arr().Get(category) == nil {
 		q.manager.Arr().AddOrUpdate(a)
 	}
 	return a, nil

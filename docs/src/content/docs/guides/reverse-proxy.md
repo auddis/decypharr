@@ -1,3 +1,8 @@
+---
+title: Reverse Proxy Setup
+description: Guide for running Decypharr behind Nginx with subfolder and subdomain configurations.
+---
+
 # Reverse Proxy Setup
 
 This guide covers how to run Decypharr behind a reverse proxy like Nginx, including configuration for subfolders and external authentication.
@@ -23,8 +28,9 @@ Set the `url_base` in your `config.yaml`:
 url_base: "/decypharr/"
 ```
 
-!!! note
+:::note
     The `url_base` must start and end with a `/`. Decypharr will normalize it automatically if you forget.
+:::
 
 ### Nginx Configuration
 
@@ -52,8 +58,9 @@ server {
 }
 ```
 
-!!! warning "Important"
+:::warning[Important]
     The `proxy_pass` URL **must** include the subfolder path (`/decypharr/`) to preserve the full request path. Using `proxy_pass http://decypharr/;` will strip the path and cause 404 errors.
+:::
 
 ### With External Authentication
 

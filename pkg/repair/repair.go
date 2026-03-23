@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -329,6 +330,11 @@ func (r *Repair) runJob(ctx context.Context, job *storage.Job) {
 		r.activeContexts.Delete(job.ID)
 		r.saveToStorage(job)
 	}()
+
+	if err := r.checkMounts(); err != nil {
+		r.handleRunError(ctx, job, err)
+		return
+	}
 
 	job.Status = storage.JobStarted
 	job.Stage = storage.JobStageDiscovering
@@ -1235,3 +1241,17 @@ func mergeStats(dst *storage.RepairStats, src storage.RepairStats) {
 	dst.Failed += src.Failed
 	dst.Unknown += src.Unknown
 }
+
+func (r *Repair) checkMounts() error {
+	cfg := config.Get()
+	for _, d := range cfg.Debrids {
+		if d.Folder == "" {
+			continue
+		}
+		if _, err := os.Stat(d.Folder); os.IsNotExist(err) {
+			return fmt.Errorf("debrid mount %s is down, skipping repair", d.Folder)
+		}
+	}
+	return nil
+}
+

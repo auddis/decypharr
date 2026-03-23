@@ -167,8 +167,8 @@ func NewStorage() *Storage {
 		}
 		name := a.Name
 		as := New(name, a.Host, a.Token, a.Cleanup, a.SkipRepair, a.DownloadUncached, a.SelectedDebrid, a.Source)
-		if utils.ValidateURL(as.Host) != nil {
-			continue
+		if err := utils.ValidateURL(as.Host); err != nil {
+			s.logger.Warn().Str("arr", name).Str("host", as.Host).Err(err).Msg("Arr host URL validation failed, but adding to storage anyway")
 		}
 		s.arrs.Store(name, as)
 	}
@@ -180,9 +180,19 @@ func (s *Storage) AddOrUpdate(arr *Arr) {
 		return
 	}
 
-	// Check the host URL
-	if utils.ValidateURL(arr.Host) != nil {
-		return
+	// If this is an auto-detected Arr, only add if no config Arr exists
+	if arr.Source == SourceAuto {
+		if existing, exists := s.arrs.Load(arr.Name); exists && existing.Source != SourceAuto {
+			// Don't overwrite config Arr with auto-detected one
+			return
+		}
+	}
+
+	// Only log warning for config Arrs
+	if arr.Source != SourceAuto {
+		if err := utils.ValidateURL(arr.Host); err != nil {
+			s.logger.Warn().Str("arr", arr.Name).Str("host", arr.Host).Err(err).Msg("Arr host URL validation failed, but adding to storage anyway")
+		}
 	}
 	s.arrs.Store(arr.Name, arr)
 }
@@ -229,10 +239,7 @@ func (s *Storage) SyncToConfig() []config.Arr {
 		exists, ok := arrConfigs[name]
 		if ok {
 			// Update existing arr config
-			// Check if the host URL is valid
-			if utils.ValidateURL(arr.Host) == nil {
-				exists.Host = arr.Host
-			}
+			exists.Host = arr.Host
 			exists.Token = cmp.Or(exists.Token, arr.Token)
 			exists.Cleanup = arr.Cleanup
 			exists.SkipRepair = arr.SkipRepair
@@ -272,10 +279,7 @@ func (s *Storage) SyncFromConfig(arrs []config.Arr) {
 	s.arrs.Range(func(name string, arr *Arr) bool {
 		if ac, ok := newMaps.Load(name); ok {
 			// Update existing arr
-			// is the host URL valid?
-			if utils.ValidateURL(ac.Host) == nil {
-				ac.Host = arr.Host
-			}
+			ac.Host = arr.Host
 			ac.Token = cmp.Or(ac.Token, arr.Token)
 			ac.Cleanup = arr.Cleanup
 			ac.SkipRepair = arr.SkipRepair
