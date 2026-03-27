@@ -278,8 +278,11 @@ func (s *Storage) SyncFromConfig(arrs []config.Arr) {
 	// AddOrUpdate or update arrs from config
 	s.arrs.Range(func(name string, arr *Arr) bool {
 		if ac, ok := newMaps.Load(name); ok {
-			// Update existing arr
-			ac.Host = arr.Host
+			// Update existing arr with new config values.
+			// Only preserve the resolved host from memory if the new host is invalid.
+			if utils.ValidateURL(ac.Host) != nil {
+				ac.Host = arr.Host
+			}
 			ac.Token = cmp.Or(ac.Token, arr.Token)
 			ac.Cleanup = arr.Cleanup
 			ac.SkipRepair = arr.SkipRepair
